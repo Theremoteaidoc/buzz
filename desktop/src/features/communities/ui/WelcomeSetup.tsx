@@ -3,6 +3,12 @@ import { Check, Copy } from "lucide-react";
 
 import { HostedCommunityOnboarding } from "@/features/communities/ui/HostedCommunityOnboarding";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
+import { useOnboardingHistory } from "@/features/onboarding/OnboardingHistory";
+import {
+  isCommunitySetupRouteStep,
+  isMachineOnboardingRouteStep,
+  type CommunitySetupRouteStep,
+} from "@/features/onboarding/onboardingRoute";
 import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
 import { OnboardingChrome } from "@/features/onboarding/ui/OnboardingChrome";
 import {
@@ -27,8 +33,19 @@ type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
 type WelcomeSetupProps = {
   initialPage?: WelcomeSetupPage;
   initialTransitionMode?: WelcomeTransitionMode;
-  onBack: () => void;
 };
+
+function routeForWelcomePage(page: WelcomeSetupPage): CommunitySetupRouteStep {
+  if (page === "welcome") return "community";
+  return `community-${page}` as CommunitySetupRouteStep;
+}
+
+function pageForWelcomeRoute(
+  step: Exclude<CommunitySetupRouteStep, "community-hosted">,
+): WelcomeSetupPage {
+  if (step === "community") return "welcome";
+  return step.slice("community-".length) as WelcomeSetupPage;
+}
 
 const COMMUNITY_OPTION_CARD_CLASS =
   "w-full max-w-[320px] items-center px-6 py-4 text-center text-sm font-normal leading-6 text-foreground [--buzz-card-textured-min-height:88px] transition-[filter] duration-150 ease-out hover:brightness-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-foreground/35";
@@ -36,7 +53,6 @@ const COMMUNITY_OPTION_CARD_CLASS =
 export function WelcomeSetup({
   initialPage = "welcome",
   initialTransitionMode = "initial",
-  onBack,
 }: WelcomeSetupProps) {
   const [page, setPage] = React.useState<WelcomeSetupPage>(initialPage);
   const [transitionMode, setTransitionMode] =
@@ -47,6 +63,7 @@ export function WelcomeSetup({
   const [isHostedSignInOpen, setIsHostedSignInOpen] = React.useState(false);
   const [copiedNpub, setCopiedNpub] = React.useState(false);
   const communityOnboarding = useCommunityOnboarding();
+  const onboardingHistory = useOnboardingHistory();
   const identityQuery = useIdentityQuery();
   const systemColorScheme = useSystemColorScheme();
   const npub = identityQuery.data?.pubkey
@@ -58,14 +75,40 @@ export function WelcomeSetup({
       : "Could not load your public key."
     : null;
 
+  React.useEffect(() => {
+    const step = onboardingHistory.step;
+    if (!step) {
+      onboardingHistory.replace(routeForWelcomePage(page));
+      return;
+    }
+    if (isMachineOnboardingRouteStep(step)) return;
+    if (!isCommunitySetupRouteStep(step)) {
+      onboardingHistory.replace(routeForWelcomePage(page));
+      return;
+    }
+
+    setTransitionMode(onboardingHistory.direction);
+    if (step === "community-hosted") {
+      setIsHostedSignInOpen(true);
+      return;
+    }
+    setIsHostedSignInOpen(false);
+    setPage(pageForWelcomeRoute(step));
+  }, [
+    onboardingHistory.direction,
+    onboardingHistory.replace,
+    onboardingHistory.step,
+    page,
+  ]);
+
   const showPage = React.useCallback(
     (nextPage: WelcomeSetupPage, direction?: OnboardingTransitionDirection) => {
       setTransitionMode(
         direction ?? (nextPage === "welcome" ? "backward" : "forward"),
       );
-      setPage(nextPage);
+      onboardingHistory.push(routeForWelcomePage(nextPage));
     },
-    [],
+    [onboardingHistory],
   );
 
   const startConnection = React.useCallback(
@@ -144,7 +187,7 @@ export function WelcomeSetup({
                 >
                   <button
                     data-testid="community-choice-create"
-                    onClick={() => setIsHostedSignInOpen(true)}
+                    onClick={() => onboardingHistory.push("community-hosted")}
                     type="button"
                   >
                     Create a community
@@ -168,7 +211,7 @@ export function WelcomeSetup({
                 <Button
                   className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
                   data-testid="welcome-setup-back"
-                  onClick={onBack}
+                  onClick={() => onboardingHistory.back("defaults")}
                   type="button"
                   variant="ghost"
                 >
@@ -199,7 +242,7 @@ export function WelcomeSetup({
                 >
                   <button
                     data-testid="existing-choice-owner"
-                    onClick={() => setIsHostedSignInOpen(true)}
+                    onClick={() => onboardingHistory.push("community-hosted")}
                     type="button"
                   >
                     I own the community
@@ -223,7 +266,7 @@ export function WelcomeSetup({
                 <Button
                   className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
                   data-testid="existing-back"
-                  onClick={() => showPage("welcome")}
+                  onClick={() => onboardingHistory.back("community")}
                   type="button"
                   variant="ghost"
                 >
@@ -237,7 +280,9 @@ export function WelcomeSetup({
               direction={transitionDirection}
               transitionKey={`owned-${transitionDirection}`}
             >
-              <HostedCommunityOnboarding onBack={() => showPage("welcome")} />
+              <HostedCommunityOnboarding
+                onBack={() => onboardingHistory.push("community")}
+              />
             </OnboardingSlideTransition>
           ) : (
             <OnboardingSlideTransition
@@ -262,7 +307,9 @@ export function WelcomeSetup({
                   error={null}
                   isRedeeming={false}
                   onCancel={() =>
-                    showPage(page === "member" ? "existing" : "welcome")
+                    onboardingHistory.back(
+                      page === "member" ? "community-existing" : "community",
+                    )
                   }
                   onConnect={startConnection}
                   onRedeem={redeemInvite}
@@ -320,10 +367,9 @@ export function WelcomeSetup({
           )}
           {isHostedSignInOpen && page !== "owned" ? (
             <HostedCommunityOnboarding
-              onBack={() => setIsHostedSignInOpen(false)}
+              onBack={() => onboardingHistory.back(routeForWelcomePage(page))}
               onReady={() => {
-                setIsHostedSignInOpen(false);
-                showPage("owned");
+                onboardingHistory.push("community-owned");
               }}
               stageHidden
             />

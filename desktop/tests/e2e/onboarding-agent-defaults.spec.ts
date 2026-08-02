@@ -75,6 +75,39 @@ async function readGlobalConfigSetterCallCount(
   });
 }
 
+test("mouse history traverses machine onboarding routes", async ({ page }) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "available", { status: "logged_in" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Create a new identity key" }).click();
+  await expect(page).toHaveURL(/#\/onboarding\/backup$/);
+  await passThroughBackupStep(page);
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/agents$/);
+
+  await page.goBack();
+  await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/backup$/);
+  await page.goForward();
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+
+  await page.getByTestId("onboarding-setup-next").click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/defaults$/);
+  await page.goBack();
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+  await page.goForward();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+});
+
 test("setup shows all bundled harnesses as detected", async ({ page }) => {
   await installMockBridge(
     page,

@@ -1421,6 +1421,58 @@ test("first-community direct join reaches profile", async ({ page }) => {
     .toEqual({ communityCount: 1, transactionMatchesOnlyCommunity: true });
 });
 
+test("mouse history traverses community choice, profile, and team routes", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(page, undefined, {
+    relayWsUrl: "ws://localhost:3000",
+    skipOnboardingSeed: true,
+    skipCommunitySeed: true,
+  });
+  await page.goto("/");
+
+  await expect(page).toHaveURL(/#\/onboarding\/community$/);
+  await page.getByRole("button", { name: /Join a community/ }).click();
+  await expect(page).toHaveURL(/#\/onboarding\/community-join$/);
+  await page.goBack();
+  await expect(
+    page.getByRole("heading", { name: "Join or create a community" }),
+  ).toBeVisible();
+  await page.goForward();
+  await expect(page.getByTestId("invite-redeem-input")).toBeVisible();
+
+  await page
+    .getByTestId("invite-redeem-input")
+    .fill("wss://history.communities.buzz.xyz");
+  await page.getByTestId("invite-redeem-submit").click();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/profile$/);
+  await page.getByTestId("community-profile-name-key").fill("Tyler");
+  await page.getByTestId("community-profile-next").click();
+  await expect(
+    page.getByRole("heading", { name: "Meet your starter team" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/team$/);
+
+  await page.goBack();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
+  await page.goForward();
+  await expect(
+    page.getByRole("heading", { name: "Meet your starter team" }),
+  ).toBeVisible();
+});
+
 test("community onboarding reuses an existing relay profile", async ({
   page,
 }) => {

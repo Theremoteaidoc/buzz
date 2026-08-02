@@ -11,6 +11,11 @@ import {
 import type { IdentityStorage } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
+import { useOnboardingHistory } from "../OnboardingHistory";
+import {
+  isMachineOnboardingRouteStep,
+  type MachineOnboardingRouteStep,
+} from "../onboardingRoute";
 import { BackupStep } from "./BackupStep";
 import { DefaultConfigStep } from "./DefaultConfigStep";
 import { DownloadKeyStep } from "./DownloadKeyStep";
@@ -43,6 +48,19 @@ export type MachineOnboardingPage =
   | "config";
 
 type BackupSubview = "created" | "options" | "password";
+
+function routeForMachinePage(
+  page: MachineOnboardingPage,
+  backupSubview: BackupSubview,
+): MachineOnboardingRouteStep {
+  if (page === "identity") return "identity";
+  if (page === "key-import") return "key-import";
+  if (page === "setup") return "agents";
+  if (page === "config") return "defaults";
+  if (backupSubview === "options") return "backup-options";
+  if (backupSubview === "password") return "backup-password";
+  return "backup";
+}
 
 /** A pending navigation the parent should execute after RouterProvider mounts. */
 export type PostOnboardingNavigation = {
@@ -99,6 +117,8 @@ export function MachineOnboardingFlow({
   // security subview keeps the created backup, password, and test progress.
   const backupSession = useEncryptedBackupSession();
   const reduceMotion = useReducedMotion() ?? false;
+  const onboardingHistory = useOnboardingHistory();
+  const previousRouteRef = React.useRef(onboardingHistory.step);
   const isSecuritySubview = page === "backup" && backupSubview !== "created";
   const handleReadyRuntimeIdsChange = React.useCallback(
     (runtimeIds: readonly string[]) => {
@@ -106,6 +126,69 @@ export function MachineOnboardingFlow({
     },
     [],
   );
+
+  React.useEffect(() => {
+    const step = onboardingHistory.step;
+    if (!step) {
+      onboardingHistory.replace(routeForMachinePage(page, backupSubview));
+      return;
+    }
+    if (!isMachineOnboardingRouteStep(step)) return;
+    if (identityLost && step === "identity") {
+      onboardingHistory.replace("key-import");
+      return;
+    }
+
+    const previousStep = previousRouteRef.current;
+    previousRouteRef.current = step;
+    setBackupDirection(onboardingHistory.direction);
+
+    if (step === "identity") {
+      setPage("identity");
+      return;
+    }
+    if (step === "key-import") {
+      setKeyImportStage("key-entry");
+      setPage("key-import");
+      return;
+    }
+    if (
+      step === "backup" ||
+      step === "backup-options" ||
+      step === "backup-password"
+    ) {
+      if (step === "backup-password" && previousStep === "agents") {
+        backupSessionToPasswordEntry(backupSession);
+      }
+      setReturningFromSecurity(
+        step === "backup" &&
+          (previousStep === "backup-options" ||
+            previousStep === "backup-password"),
+      );
+      setBackupSubview(
+        step === "backup-options"
+          ? "options"
+          : step === "backup-password"
+            ? "password"
+            : "created",
+      );
+      setPage("backup");
+      return;
+    }
+    if (step === "agents") {
+      setPage("setup");
+      return;
+    }
+    setPage("config");
+  }, [
+    backupSession,
+    backupSubview,
+    identityLost,
+    onboardingHistory.direction,
+    onboardingHistory.replace,
+    onboardingHistory.step,
+    page,
+  ]);
 
   const loadFreshIdentity = React.useCallback(async () => {
     setIsPending(true);
@@ -118,7 +201,7 @@ export function MachineOnboardingFlow({
       setBackupDirection("forward");
       setReturningFromSecurity(false);
       setBackupSubview("created");
-      setPage("backup");
+      onboardingHistory.push("backup");
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : "Failed to load identity",
@@ -126,7 +209,7 @@ export function MachineOnboardingFlow({
     } finally {
       setIsPending(false);
     }
-  }, [queryClient]);
+  }, [onboardingHistory, queryClient]);
 
   const replaceLostIdentity = React.useCallback(async () => {
     const confirmed = window.confirm(
@@ -144,7 +227,7 @@ export function MachineOnboardingFlow({
       setBackupDirection("forward");
       setReturningFromSecurity(false);
       setBackupSubview("created");
-      setPage("backup");
+      onboardingHistory.push("backup");
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : "Failed to save identity",
@@ -152,7 +235,7 @@ export function MachineOnboardingFlow({
     } finally {
       setIsPending(false);
     }
-  }, [queryClient]);
+  }, [onboardingHistory, queryClient]);
 
   const importExistingIdentity = React.useCallback(
     async (nsec: string, password?: string) => {
@@ -161,9 +244,9 @@ export function MachineOnboardingFlow({
       queryClient.setQueryData(["identity"], identity);
       setIdentityWasImported(true);
       setSelectedPubkey(identity.pubkey);
-      setPage("setup");
+      onboardingHistory.push("agents");
     },
-    [continueWithIdentity, queryClient],
+    [continueWithIdentity, onboardingHistory, queryClient],
   );
 
   return (
@@ -187,7 +270,10 @@ export function MachineOnboardingFlow({
             onClick={() => {
               setBackupDirection("backward");
               setReturningFromSecurity(true);
-              setBackupSubview("created");
+              onboardingHistory.backBy(
+                onboardingHistory.step === "backup-password" ? 2 : 1,
+                "backup",
+              );
             }}
             type="button"
             variant="ghost"
@@ -244,7 +330,7 @@ export function MachineOnboardingFlow({
                   disabled={isPending}
                   onClick={() => {
                     setKeyImportStage("key-entry");
-                    setPage("key-import");
+                    onboardingHistory.push("key-import");
                   }}
                   type="button"
                   variant="ghost"
@@ -259,7 +345,7 @@ export function MachineOnboardingFlow({
           ) : page === "key-import" ? (
             <OnboardingSlideTransition
               className="flex min-h-[calc(100dvh-13.25rem)] w-full max-w-[837px] flex-col items-center text-center"
-              direction="forward"
+              direction={onboardingHistory.direction}
               effect="fade"
               transitionKey="machine-key-import"
             >
@@ -294,7 +380,7 @@ export function MachineOnboardingFlow({
                   onBack={
                     identityLost
                       ? () => void replaceLostIdentity()
-                      : () => setPage("identity")
+                      : () => onboardingHistory.back("identity")
                   }
                   onImport={importExistingIdentity}
                   onStageChange={setKeyImportStage}
@@ -308,9 +394,8 @@ export function MachineOnboardingFlow({
                 direction={backupDirection}
                 onBack={() => {
                   resetEncryptedBackupSession(backupSession);
-                  setBackupDirection("backward");
                   setReturningFromSecurity(false);
-                  setBackupSubview("options");
+                  onboardingHistory.back("backup-options");
                 }}
                 session={backupSession}
               />
@@ -318,18 +403,18 @@ export function MachineOnboardingFlow({
               <BackupStep
                 direction={backupDirection}
                 identityStorage={identityStorage}
-                onBack={() => setPage("identity")}
-                onNext={() => setPage("setup")}
+                onBack={() => onboardingHistory.back("identity")}
+                onNext={() => onboardingHistory.push("agents")}
                 onOpenPasswordBackup={() => {
                   resetEncryptedBackupSession(backupSession);
                   setBackupDirection("forward");
                   setReturningFromSecurity(false);
-                  setBackupSubview("password");
+                  onboardingHistory.push("backup-password");
                 }}
                 onShowOptions={() => {
                   setBackupDirection("forward");
                   setReturningFromSecurity(false);
-                  setBackupSubview("options");
+                  onboardingHistory.push("backup-options");
                 }}
                 optionsExpanded={backupSubview === "options"}
                 returningFromSecurity={returningFromSecurity}
@@ -341,17 +426,15 @@ export function MachineOnboardingFlow({
                 // Fresh-key users return to whichever identity backup subview
                 // they used to reach setup; imported keys skip backup entirely.
                 back: () => {
-                  if (identityWasImported) {
-                    setKeyImportStage("key-entry");
-                    setPage("key-import");
-                    return;
-                  }
                   if (backupSubview === "password") {
                     backupSessionToPasswordEntry(backupSession);
                   }
-                  setBackupDirection("backward");
                   setReturningFromSecurity(false);
-                  setPage("backup");
+                  onboardingHistory.back(
+                    identityWasImported
+                      ? "key-import"
+                      : routeForMachinePage("backup", backupSubview),
+                  );
                 },
                 next: (runtimeIds) => {
                   const ids = Array.from(runtimeIds);
@@ -362,32 +445,32 @@ export function MachineOnboardingFlow({
                     complete(selectedPubkey ?? undefined);
                     return;
                   }
-                  setPage("config");
+                  onboardingHistory.push("defaults");
                 },
                 navigateToAgentSettings: () => {
                   // Complete onboarding first, then delegate the Settings → Agents
                   // navigation to the parent.  The parent owns RouterProvider, so
                   // navigation from within the onboarding flow races with the
                   // router mounting — calling router.navigate() here is unsafe.
-                  complete(selectedPubkey ?? undefined);
                   navigateAfterComplete?.({
                     to: "/settings",
                     search: { section: "agents" },
                   });
+                  complete(selectedPubkey ?? undefined);
                 },
               }}
-              direction="forward"
+              direction={onboardingHistory.direction}
               onReadyRuntimeIdsChange={handleReadyRuntimeIdsChange}
             />
           ) : (
             <DefaultConfigStep
               actions={{
-                back: () => setPage("setup"),
+                back: () => onboardingHistory.back("agents"),
                 complete: () => complete(selectedPubkey ?? undefined),
                 discardDraft: () => setDefaultConfigDraft(null),
                 updateDraft: setDefaultConfigDraft,
               }}
-              direction="forward"
+              direction={onboardingHistory.direction}
               draft={defaultConfigDraft}
               readyRuntimeIds={readyRuntimeIds}
             />
