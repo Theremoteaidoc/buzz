@@ -299,10 +299,19 @@ export function CommunityOnboardingFlow({
   }, [finish, isPending, onboardingHistory, queryClient, relayUrl, update]);
 
   const backToProfile = React.useCallback(() => {
-    if (isPending) return;
+    if (isPending || !transaction) return;
     setStarterChannelFailureCount(0);
+    update({ stage: "profile", error: undefined }, transaction.id);
     onboardingHistory.back("profile");
-  }, [isPending, onboardingHistory]);
+  }, [isPending, onboardingHistory, transaction, update]);
+
+  const backToCommunitySetup = React.useCallback(() => {
+    if (isPending || !transaction) return;
+    onboardingHistory.back(
+      routeForFirstCommunityPage(transaction.firstCommunityPage),
+    );
+    void onCancel();
+  }, [isPending, onboardingHistory, onCancel, transaction]);
 
   const isProfileStage = transaction?.stage === "profile";
   React.useEffect(() => {
@@ -671,13 +680,7 @@ export function CommunityOnboardingFlow({
                   className="h-9 w-20 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
                   data-testid="community-profile-back"
                   disabled={isPending || isUploadingAvatar}
-                  onClick={() =>
-                    onboardingHistory.back(
-                      routeForFirstCommunityPage(
-                        transaction.firstCommunityPage,
-                      ),
-                    )
-                  }
+                  onClick={backToCommunitySetup}
                   type="button"
                   variant="ghost"
                 >
