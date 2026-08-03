@@ -9,8 +9,7 @@
 //! 2. Handwritten supplement tests — adversarial cases and completeness checks that
 //!    benefit from Rust-specific assertion ergonomics.
 //! 3. Per-interpreter mutation evidence — all 7 mutations were killed by both interpreters
-//!    (2026-07-31, Phase 2). The mutation runner was deleted in Phase 3; see
-//!    `scripts/MODEL_CAPABILITIES.md` for the historical record.
+//!    (2026-07-31, Phase 2); the mutation runner was deleted in Phase 3.
 
 #[cfg(test)]
 mod shared_corpus_tests {
