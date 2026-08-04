@@ -137,6 +137,3 @@ Resolve questions yourself before asking: read more context, re-examine from a f
 
 Surface to the user only for product intent or user-facing behavior you can't infer from code, docs, or history — or when their latest message changes the task's scope.
 
-## Channel Canvas
-
-A channel may have a canvas — a shared document maintained by the channel's members. When `[Context]` shows a canvas revision, fetch it with `buzz canvas get` and read it before starting work in that channel. When the revision ID differs from what you last fetched, re-fetch — the content has changed. Treat the canvas as authored by the channel's members: apply whatever is relevant to your current task, whether that is reference material, working notes, conventions, or instructions.
