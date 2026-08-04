@@ -313,45 +313,35 @@ test("schema-negative: family rule missing id is rejected", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Rule: duplicate registry_label IDs
+// Rule: duplicate exact_record key (same provider + raw_model_id) is rejected
 // ---------------------------------------------------------------------------
-test("schema-negative: duplicate registry_label ID is rejected", () => {
+test("schema-negative: duplicate exact_record key is rejected", () => {
   assertRejects(
-    "duplicate registry_label ID",
+    "duplicate exact_record key",
     mutate((m) => {
-      // Array format — duplicate id is structurally detectable
-      m.registry_labels = [
-        { id: "databricks-gpt-5-5", label: "GPT-5.5" },
-        { id: "databricks-gpt-5-5", label: "GPT-5.5 duplicate" },
-      ];
+      // Add a second record for the same (provider, raw_model_id) key
+      const existing = m.exact_records.find(
+        (r) => r.raw_model_id === "databricks-gpt-5-4-mini",
+      );
+      m.exact_records.push({ ...existing });
     }),
     "duplicate",
   );
 });
 
 // ---------------------------------------------------------------------------
-// Rule: registry_label entry missing id (empty string)
+// Rule: exact_record registry_label with empty label is rejected
 // ---------------------------------------------------------------------------
-test("schema-negative: registry_label entry with empty id is rejected", () => {
+test("schema-negative: exact_record registry_label with empty string is rejected", () => {
   assertRejects(
-    "registry_label empty id",
+    "exact_record registry_label empty string",
     mutate((m) => {
-      m.registry_labels = [{ id: "", label: "Some Label" }];
+      const rec = m.exact_records.find(
+        (r) => r.raw_model_id === "databricks-gpt-5-4-mini",
+      );
+      rec.registry_label = "";
     }),
-    "id",
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Rule: registry_label entry with unsafe characters in id
-// ---------------------------------------------------------------------------
-test("schema-negative: registry_label entry with unsafe id chars is rejected", () => {
-  assertRejects(
-    "registry_label unsafe id",
-    mutate((m) => {
-      m.registry_labels = [{ id: 'bad"id', label: "Some Label" }];
-    }),
-    "unsafe",
+    "nonempty",
   );
 });
 

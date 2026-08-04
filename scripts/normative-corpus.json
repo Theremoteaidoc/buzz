@@ -34,7 +34,7 @@
       "default_effort": null,
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "none",
-      "registry_label": "Claude Opus 4.5"
+      "registry_label": null
     }
   },
   {
@@ -53,7 +53,7 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "none",
-      "registry_label": "Claude Opus 4.7"
+      "registry_label": null
     }
   },
   {
@@ -72,7 +72,7 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "none",
-      "registry_label": "Claude Opus 4.8"
+      "registry_label": null
     }
   },
   {
@@ -91,7 +91,7 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "none",
-      "registry_label": "Claude Sonnet 5"
+      "registry_label": null
     }
   },
   {
@@ -110,7 +110,7 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "none",
-      "registry_label": "Claude Fable 5"
+      "registry_label": null
     }
   },
   {
@@ -129,7 +129,7 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "none",
-      "registry_label": "Claude Mythos 5"
+      "registry_label": null
     }
   },
   {
@@ -147,7 +147,7 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "none",
-      "registry_label": "Claude Opus 4.6"
+      "registry_label": null
     }
   },
   {
@@ -165,7 +165,7 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "none",
-      "registry_label": "Claude Sonnet 4.6"
+      "registry_label": null
     }
   },
   {
@@ -183,7 +183,7 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "none",
-      "registry_label": "Claude Mythos Preview"
+      "registry_label": null
     }
   },
   {
@@ -242,7 +242,7 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5 Pro"
+      "registry_label": null
     }
   },
   {
@@ -262,7 +262,7 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5.6"
+      "registry_label": null
     }
   },
   {
@@ -282,7 +282,7 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5.6"
+      "registry_label": null
     }
   },
   {
@@ -301,7 +301,7 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5.5"
+      "registry_label": null
     }
   },
   {
@@ -320,7 +320,7 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5.4"
+      "registry_label": null
     }
   },
   {
@@ -338,7 +338,7 @@
       "default_effort": "none",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5.1"
+      "registry_label": null
     }
   },
   {
@@ -356,11 +356,11 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5"
+      "registry_label": null
     }
   },
   {
-    "_group": "OpenAI adversarial — gpt5 boundary-aware matching (ported from config.rs tests)"
+    "_group": "OpenAI adversarial \u2014 gpt5 boundary-aware matching (ported from config.rs tests)"
   },
   {
     "id": "openai-gpt5-1106-should-not-match-base",
@@ -378,7 +378,7 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5"
+      "registry_label": null
     }
   },
   {
@@ -397,7 +397,7 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5"
+      "registry_label": null
     }
   },
   {
@@ -413,14 +413,14 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5 Pro"
+      "registry_label": null
     }
   },
   {
     "id": "openai-multi-digit-version-gpt5-10",
     "provider": "openai",
     "raw_model_id": "gpt-5-10",
-    "_note": "gpt-5-10 — two-digit suffix prevents gpt5-base match. Falls through to unknown.",
+    "_note": "gpt-5-10 \u2014 two-digit suffix prevents gpt5-base match. Falls through to unknown.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -441,7 +441,7 @@
     "id": "openai-gpt5-date-suffix",
     "provider": "openai",
     "raw_model_id": "gpt-5-20260101",
-    "_note": "gpt-5-20260101 — long numeric suffix after base: '20260101' is 8 digits, beyond 1-3 digit reject, should hit gpt5-base.",
+    "_note": "gpt-5-20260101 \u2014 long numeric suffix after base: '20260101' is 8 digits, beyond 1-3 digit reject, should hit gpt5-base.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -453,11 +453,11 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5"
+      "registry_label": null
     }
   },
   {
-    "_group": "DatabricksV2 — segment-based routing (ported from llm.rs tests)"
+    "_group": "DatabricksV2 \u2014 segment-based routing (ported from llm.rs tests)"
   },
   {
     "id": "dbv2-gpt5-route-openai-responses",
@@ -475,7 +475,7 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "openai-responses",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5.5"
+      "registry_label": null
     }
   },
   {
@@ -494,14 +494,14 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "anthropic-messages",
       "normalization_policy": "none",
-      "registry_label": "Claude Opus 4.7"
+      "registry_label": null
     }
   },
   {
     "id": "dbv2-claude-prefix-stripped",
     "provider": "databricks_v2",
     "raw_model_id": "databricks-claude-opus-4-7",
-    "_note": "databricks- prefix stripped → claude-opus-4-7 → Anthropic route",
+    "_note": "databricks- prefix stripped \u2192 claude-opus-4-7 \u2192 Anthropic route",
     "expect": {
       "thinking_mode": "adaptive",
       "supported_efforts": [
@@ -521,7 +521,7 @@
     "id": "dbv2-goose-claude-prefix-stripped",
     "provider": "databricks_v2",
     "raw_model_id": "goose-claude-fable-5",
-    "_note": "goose- prefix stripped → claude-fable-5 → Anthropic adaptive+xhigh",
+    "_note": "goose- prefix stripped \u2192 claude-fable-5 \u2192 Anthropic adaptive+xhigh",
     "expect": {
       "thinking_mode": "adaptive",
       "supported_efforts": [
@@ -534,14 +534,14 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "anthropic-messages",
       "normalization_policy": "none",
-      "registry_label": "Claude Fable 5"
+      "registry_label": null
     }
   },
   {
     "id": "dbv2-team-prefix-stripped",
     "provider": "databricks_v2",
     "raw_model_id": "team-x-claude-opus-4-7",
-    "_note": "team-x- prefix stripped → claude-opus-4-7 → Anthropic route",
+    "_note": "team-x- prefix stripped \u2192 claude-opus-4-7 \u2192 Anthropic route",
     "expect": {
       "thinking_mode": "adaptive",
       "supported_efforts": [
@@ -554,14 +554,14 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "anthropic-messages",
       "normalization_policy": "none",
-      "registry_label": "Claude Opus 4.7"
+      "registry_label": null
     }
   },
   {
     "id": "dbv2-consolidated-llama-not-sol",
     "provider": "databricks_v2",
     "raw_model_id": "consolidated-llama",
-    "_note": "segment test: 'sol' is a SUBSTRING of 'consolidated' — must NOT match DATABRICKS_V2_OPENAI_CODE_NAMES 'sol'. Falls through to mlflow-chat.",
+    "_note": "segment test: 'sol' is a SUBSTRING of 'consolidated' \u2014 must NOT match DATABRICKS_V2_OPENAI_CODE_NAMES 'sol'. Falls through to mlflow-chat.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -582,7 +582,7 @@
     "id": "dbv2-terraform-coder-not-terra",
     "provider": "databricks_v2",
     "raw_model_id": "terraform-coder",
-    "_note": "segment test: 'terra' is a prefix of 'terraform' — must NOT match 'terra' code name. Falls through to mlflow-chat.",
+    "_note": "segment test: 'terra' is a prefix of 'terraform' \u2014 must NOT match 'terra' code name. Falls through to mlflow-chat.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -662,7 +662,7 @@
     }
   },
   {
-    "_group": "P2-A resolver-contract vectors (plan v4 §Resolver contract)"
+    "_group": "P2-A resolver-contract vectors (plan v4 \u00a7Resolver contract)"
   },
   {
     "id": "resolver-exact-raw-id-hit",
@@ -679,14 +679,14 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "openai-responses",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5.4 Mini"
+      "registry_label": "GPT-5.4 mini"
     }
   },
   {
     "id": "resolver-prefixed-alias-misses-exact",
     "provider": "databricks_v2",
     "raw_model_id": "team-x-databricks-gpt-5-4-mini",
-    "_note": "Prefixed alias of an exact ID. Raw exact lookup MUST miss (key is team-x-..., not databricks-...). Falls to family rules (gpt5-4 family → none+xhigh).",
+    "_note": "Prefixed alias of an exact ID. Raw exact lookup MUST miss (key is team-x-..., not databricks-...). Falls to family rules (gpt5-4 family \u2192 none+xhigh).",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -699,7 +699,7 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "openai-responses",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5.4"
+      "registry_label": null
     }
   },
   {
@@ -719,14 +719,14 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5.4"
+      "registry_label": null
     }
   },
   {
     "id": "resolver-exact-efforts-plus-family-route",
     "provider": "databricks_v2",
     "raw_model_id": "databricks-gpt-5-6-sol",
-    "_note": "Exact record with efforts from models.dev (low|medium|high|max — provider-advertised, no none/xhigh). Route materialized from gpt5-6 family rule (openai-responses). Must return both, complete.",
+    "_note": "Exact record with efforts from models.dev (low|medium|high|max \u2014 provider-advertised, no none/xhigh). Route materialized from gpt5-6 family rule (openai-responses). Must return both, complete.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -745,7 +745,7 @@
     "id": "dbv2-gpt5-5-exact-override",
     "provider": "databricks_v2",
     "raw_model_id": "databricks-gpt-5-5",
-    "_note": "Exact record adopts models.dev advertised set [low,medium,high]. Family rule (gpt5-5) has none+xhigh — provider-advertised wins per plan F1.",
+    "_note": "Exact record adopts models.dev advertised set [low,medium,high]. Family rule (gpt5-5) has none+xhigh \u2014 provider-advertised wins per plan F1.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -894,7 +894,7 @@
     "id": "databricks-gpt5-pro-effort",
     "provider": "databricks",
     "raw_model_id": "databricks-gpt-5-pro",
-    "_note": "Legacy databricks GPT-5 Pro: same effort set as openai/gpt-5-pro — only [high], default high. Wire route not-applicable.",
+    "_note": "Legacy databricks GPT-5 Pro: same effort set as openai/gpt-5-pro \u2014 only [high], default high. Wire route not-applicable.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -903,14 +903,14 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5 Pro"
+      "registry_label": null
     }
   },
   {
     "id": "databricks-gpt5-6-effort",
     "provider": "databricks",
     "raw_model_id": "databricks-gpt-5.6",
-    "_note": "Legacy databricks GPT-5.6: same effort set as openai/gpt-5.6 — [none,low,medium,high,xhigh,max], default medium. Wire route not-applicable.",
+    "_note": "Legacy databricks GPT-5.6: same effort set as openai/gpt-5.6 \u2014 [none,low,medium,high,xhigh,max], default medium. Wire route not-applicable.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -924,14 +924,14 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5.6"
+      "registry_label": null
     }
   },
   {
     "id": "databricks-gpt5-1-effort",
     "provider": "databricks",
     "raw_model_id": "databricks-gpt-5.1",
-    "_note": "Legacy databricks GPT-5.1: same effort set as openai/gpt-5.1 — [none,low,medium,high], default none. Wire route not-applicable.",
+    "_note": "Legacy databricks GPT-5.1: same effort set as openai/gpt-5.1 \u2014 [none,low,medium,high], default none. Wire route not-applicable.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -943,12 +943,12 @@
       "default_effort": "none",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5.1"
+      "registry_label": null
     }
   },
   {
     "_group": "openai-compat alias canonicalization (Thufir P3 corrective action 1)",
-    "_note": "Rust normalizes openai-compat → Provider::OpenAi before reaching normalize_effort_for_provider. TS PROVIDER_ALIASES must match so the UI effort table equals the Rust request behavior. Interpreters must canonicalize openai-compat → openai before resolving; the expected values are identical to the corresponding openai vectors."
+    "_note": "Rust normalizes openai-compat \u2192 Provider::OpenAi before reaching normalize_effort_for_provider. TS PROVIDER_ALIASES must match so the UI effort table equals the Rust request behavior. Interpreters must canonicalize openai-compat \u2192 openai before resolving; the expected values are identical to the corresponding openai vectors."
   },
   {
     "id": "openai-compat-gpt-5-pro",
@@ -963,7 +963,7 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5 Pro"
+      "registry_label": null
     }
   },
   {
@@ -983,14 +983,14 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5.5"
+      "registry_label": null
     }
   },
   {
     "id": "openai-compat-empty-model",
     "provider": "openai-compat",
     "raw_model_id": "",
-    "_note": "openai-compat with blank model: resolves identically to openai unknown — all-except-max, default medium.",
+    "_note": "openai-compat with blank model: resolves identically to openai unknown \u2014 all-except-max, default medium.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -1015,7 +1015,7 @@
     "id": "openai-gpt5-10-preview-reject-base",
     "provider": "openai",
     "raw_model_id": "gpt-5-10-preview",
-    "_note": "CRITICAL divergence fix: -10- is a 2-digit suffix → gpt5-base rejects. Falls to openai concrete-unknown.",
+    "_note": "CRITICAL divergence fix: -10- is a 2-digit suffix \u2192 gpt5-base rejects. Falls to openai concrete-unknown.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -1036,7 +1036,7 @@
     "id": "openai-gpt5-2-mini-reject-base",
     "provider": "openai",
     "raw_model_id": "gpt-5-2-mini",
-    "_note": "CRITICAL divergence fix: -2- is a 1-digit suffix → gpt5-base rejects. Falls to openai concrete-unknown.",
+    "_note": "CRITICAL divergence fix: -2- is a 1-digit suffix \u2192 gpt5-base rejects. Falls to openai concrete-unknown.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -1057,7 +1057,7 @@
     "id": "openai-gpt5-9-dot-1-reject-base",
     "provider": "openai",
     "raw_model_id": "gpt-5-9.1",
-    "_note": "CRITICAL divergence fix: -9 followed by '.' is a 1-digit suffix + non-alnum → gpt5-base rejects. Falls to openai concrete-unknown.",
+    "_note": "CRITICAL divergence fix: -9 followed by '.' is a 1-digit suffix + non-alnum \u2192 gpt5-base rejects. Falls to openai concrete-unknown.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -1145,7 +1145,7 @@
     "id": "dbv2-customgpt-not-responses",
     "provider": "databricks_v2",
     "raw_model_id": "customgpt-5-5-endpoint",
-    "_note": "customgpt-5-5-endpoint: boundary-aware strip finds no boundary-aligned gpt- (preceded by m in customgpt). Normalized alias is customgpt-5-5-endpoint itself, segments=[customgpt,5,5,endpoint], no gpt segment → mlflow-chat. This is the corrected behavior.",
+    "_note": "customgpt-5-5-endpoint: boundary-aware strip finds no boundary-aligned gpt- (preceded by m in customgpt). Normalized alias is customgpt-5-5-endpoint itself, segments=[customgpt,5,5,endpoint], no gpt segment \u2192 mlflow-chat. This is the corrected behavior.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -1166,7 +1166,7 @@
     "id": "dbv2-gpt-neox-mlflow",
     "provider": "databricks_v2",
     "raw_model_id": "gpt-neox-20b",
-    "_note": "gpt-version-segment fix: gpt-neox-20b strips to itself (boundary-aligned at start), segments=[gpt,neox,20b]. gpt-version-segment requires next segment after gpt to be numeric; neox starts with n → no match → falls to mlflow-chat. This is corrected behavior.",
+    "_note": "gpt-version-segment fix: gpt-neox-20b strips to itself (boundary-aligned at start), segments=[gpt,neox,20b]. gpt-version-segment requires next segment after gpt to be numeric; neox starts with n \u2192 no match \u2192 falls to mlflow-chat. This is corrected behavior.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -1187,7 +1187,7 @@
     "id": "dbv2-gpt5-segment-positive",
     "provider": "databricks_v2",
     "raw_model_id": "databricks-gpt5-custom",
-    "_note": "DBv2 gpt segment rule positive: normalized 'gpt5-custom' → segment 'gpt5' IS an exact match in match_aliases. Routes openai-responses.",
+    "_note": "DBv2 gpt segment rule positive: normalized 'gpt5-custom' \u2192 segment 'gpt5' IS an exact match in match_aliases. Routes openai-responses.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -1199,14 +1199,14 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "openai-responses",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5"
+      "registry_label": null
     }
   },
   {
     "id": "dbv2-dual-marker-gpt-wins-openai",
     "provider": "databricks_v2",
     "raw_model_id": "gpt-opus-5",
-    "_note": "Dual-marker: normalized 'gpt-opus-5' → segments include 'gpt' AND 'opus'. Priority 6 (gpt) > 5 (claude): OpenAI wins. Must route openai-responses.",
+    "_note": "Dual-marker: normalized 'gpt-opus-5' \u2192 segments include 'gpt' AND 'opus'. Priority 6 (gpt) > 5 (claude): OpenAI wins. Must route openai-responses.",
     "expect": {
       "thinking_mode": "omit-fields",
       "supported_efforts": [
@@ -1242,7 +1242,7 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "none",
-      "registry_label": "Claude Opus 5"
+      "registry_label": null
     }
   },
   {
@@ -1315,14 +1315,14 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "openai-responses",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5.4 Nano"
+      "registry_label": "GPT-5.4 nano"
     }
   },
   {
     "id": "openrouter-concrete-unknown-fallback",
     "provider": "openrouter",
     "raw_model_id": "some-model-xyz",
-    "_note": "openrouter concrete-unknown → _default fallback (wire route not-applicable).",
+    "_note": "openrouter concrete-unknown \u2192 _default fallback (wire route not-applicable).",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
@@ -1353,7 +1353,7 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5 Pro"
+      "registry_label": null
     }
   },
   {
@@ -1371,7 +1371,7 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "openai-responses",
       "normalization_policy": "openai-standard",
-      "registry_label": "GPT-5.4 Nano"
+      "registry_label": "GPT-5.4 nano"
     }
   },
   {
@@ -1551,6 +1551,64 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "mlflow-chat",
       "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-gpt-5-mini-exact-label",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-gpt-5-mini",
+    "_note": "Exact record: label 'GPT-5 Mini'. Display rule (a): exact-record-only, family 'GPT-5' must NOT appear.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard",
+      "registry_label": "GPT-5 Mini"
+    }
+  },
+  {
+    "id": "dbv2-gpt-5-nano-exact-label",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-gpt-5-nano",
+    "_note": "Exact record: label 'GPT-5 Nano'. Display rule (a): exact-record-only, family 'GPT-5' must NOT appear.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-standard",
+      "registry_label": "GPT-5 Nano"
+    }
+  },
+  {
+    "id": "dbv2-family-matched-no-exact-label-null",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-claude-opus-5-custom",
+    "_note": "Family-matched (databricks- prefix stripped \u2192 claude-opus-5 \u2192 Anthropic adaptive). No exact record. Display rule (a): registry_label is null.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
       "registry_label": null
     }
   }

@@ -10,7 +10,7 @@
 //! - PKCE cache empty / no token: returns `Err(AgentError::LlmAuth)` — the
 //!   caller degrades gracefully; no browser, no hang.
 
-use crate::databricks_model_names::DATABRICKS_MODEL_NAMES;
+use crate::generated_model_capabilities::DATABRICKS_MODEL_NAMES;
 
 use reqwest::Client;
 
@@ -23,10 +23,11 @@ use crate::{
 /// Returns the curated display name for a Databricks endpoint ID, or the raw
 /// ID when no entry exists in the registry.
 ///
-/// The registry (`DATABRICKS_MODEL_NAMES`) is generated from
-/// [models.dev](https://models.dev/api.json) and covers the ~30 managed
-/// Databricks endpoints. Any custom/workspace endpoint not in the table is
-/// returned untouched — no heuristic guessing.
+/// The registry (`DATABRICKS_MODEL_NAMES`) is generated from the manifest
+/// (`scripts/model-capabilities.json`) exact records for the `databricks_v2`
+/// provider and covers the ~30 managed Databricks endpoints. Any custom or
+/// workspace endpoint not in the table is returned untouched — no heuristic
+/// guessing.
 pub(crate) fn databricks_model_name(id: &str) -> &str {
     DATABRICKS_MODEL_NAMES
         .iter()

@@ -73,40 +73,11 @@ const outputDirOverride = (() => {
 const manifestPath = manifestPathOverride ?? join(repoRoot, "scripts", "model-capabilities.json");
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 
-// Validate registry_labels — must be an array of {id, label} objects with unique IDs.
-// JSON.parse() silently overwrites duplicate object keys, so an array is required for
-// structural duplicate detection.
-const registryLabelsArr = manifest.registry_labels ?? [];
-if (!Array.isArray(registryLabelsArr)) {
-  throw new Error("registry_labels: must be an array of {id, label} objects");
-}
-for (const entry of registryLabelsArr) {
-  if (!entry.id || typeof entry.id !== "string" || entry.id.trim() === "") {
-    throw new Error(`registry_labels: entry missing nonempty string "id": ${JSON.stringify(entry)}`);
-  }
-  if (!entry.label || typeof entry.label !== "string" || entry.label.trim() === "") {
-    throw new Error(`registry_labels: entry id="${entry.id}" missing nonempty string "label"`);
-  }
-  // Safe for code interpolation: reject double-quote, backslash, and control chars.
-  // (These characters would break emitted Rust/TS string literals.)
-  // Checked via requireSafeString() below (shared validator defined after knownModels block).
-  const unsafeId = entry.id.includes('"') || entry.id.includes("\\") ||
-    Array.from(entry.id).some((c) => c.charCodeAt(0) < 32);
-  if (unsafeId) {
-    throw new Error(`registry_labels: entry id="${entry.id}" contains unsafe characters`);
-  }
-  const unsafeLabel = entry.label.includes('"') || entry.label.includes("\\") ||
-    Array.from(entry.label).some((c) => c.charCodeAt(0) < 32);
-  if (unsafeLabel) {
-    throw new Error(`registry_labels: entry id="${entry.id}" label contains unsafe characters`);
-  }
-}
-const registryLabelIds = registryLabelsArr.map((e) => e.id);
-const registryLabelSet = new Set(registryLabelIds);
-if (registryLabelSet.size !== registryLabelIds.length) {
-  const dups = registryLabelIds.filter((id, i) => registryLabelIds.indexOf(id) !== i);
-  throw new Error(`registry_labels: duplicate endpoint IDs detected: ${dups.join(", ")}`);
-}
+// DATABRICKS_MODEL_NAMES is derived from exact_records (provider=databricks_v2 with registry_label).
+// Unsafe-string validation for registry_label values runs in the exact_records validation loop.
+const databricksExactRecords = (manifest.exact_records ?? []).filter(
+  (r) => r.provider === "databricks_v2" && r.registry_label != null,
+);
 
 // Validate databricks_v2_known_models uniqueness
 const knownModels = manifest.databricks_v2_known_models ?? [];
@@ -166,10 +137,6 @@ for (const rule of manifest.family_rules ?? []) {
   }
   for (const provider of rule.providers ?? []) {
     requireSafeString(provider, `family_rules[${rule.id}].providers[]`);
-  }
-  // registry_label flows into Rust Some("...") and TS "..." string literals
-  if (rule.registry_label != null) {
-    requireSafeString(rule.registry_label, `family_rules[${rule.id}].registry_label`);
   }
 }
 
@@ -1080,12 +1047,13 @@ ${manifest.databricks_v2_known_models
   .join("\n")}
 ];
 
-/// Databricks endpoint-ID to display-name registry. Generated from manifest registry_labels section.
-/// Feeds the static registry tier of resolveModelLabel(). Final display label is determined
-/// by the three-tier precedence in resolveModelLabel() (discovered_name > registry_label > raw_id).
+/// Databricks endpoint-ID to display-name registry. Generated from manifest exact_records
+/// (provider = databricks_v2, registry_label present). Feeds the static registry tier of
+/// resolveModelLabel(). Final display label is determined by the three-tier precedence
+/// in resolveModelLabel() (discovered_name > registry_label > raw_id).
 pub const DATABRICKS_MODEL_NAMES: &[(&str, &str)] = &[
-${registryLabelsArr
-  .map(({ id, label }) => `    ("${id}", "${label}"),`)
+${databricksExactRecords
+  .map(({ raw_model_id, registry_label }) => `    ("${raw_model_id}", "${registry_label}"),`)
   .join("\n")}
 ];
 `;
@@ -1480,11 +1448,12 @@ ${manifest.databricks_v2_known_models
   .join("\n")}
 ] as const;
 
-/** Databricks endpoint-ID to display-name registry. Generated from manifest registry_labels section.
- *  Feeds the static registry tier of resolveModelLabel(). */
+/** Databricks endpoint-ID to display-name registry. Generated from manifest exact_records
+ *  (provider = databricks_v2, registry_label present). Feeds the static registry tier of
+ *  resolveModelLabel(). */
 export const DATABRICKS_MODEL_NAMES: Map<string, string> = new Map([
-${registryLabelsArr
-  .map(({ id, label }) => `  ["${id}", "${label}"],`)
+${databricksExactRecords
+  .map(({ raw_model_id, registry_label }) => `  ["${raw_model_id}", "${registry_label}"],`)
   .join("\n")}
 ]);
 

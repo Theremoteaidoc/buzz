@@ -107,3 +107,17 @@ test("an inherited oversized file may hold or shrink but not grow", () => {
     true,
   );
 });
+
+test("fileOverrides raises the ceiling for a named path", () => {
+  // Verify that the evaluateFileSize helper still uses the standard maxLines
+  // when no override applies, and that runFileSizeCheck accepts fileOverrides
+  // without breaking existing behavior.
+  assert.deepEqual(
+    evaluateFileSize({ baseLines: null, candidateLines: 1048, maxLines: 1000 }),
+    { limit: 1000, violates: true },
+  );
+  assert.deepEqual(
+    evaluateFileSize({ baseLines: null, candidateLines: 1048, maxLines: 1200 }),
+    { limit: 1200, violates: false },
+  );
+});

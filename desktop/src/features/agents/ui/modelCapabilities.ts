@@ -48,14 +48,21 @@ export const DATABRICKS_V2_KNOWN_MODELS = [
   "databricks-claude-opus-4-7",
 ] as const;
 
-/** Databricks endpoint-ID to display-name registry. Generated from manifest registry_labels section.
- *  Feeds the static registry tier of resolveModelLabel(). */
+/** Databricks endpoint-ID to display-name registry. Generated from manifest exact_records
+ *  (provider = databricks_v2, registry_label present). Feeds the static registry tier of
+ *  resolveModelLabel(). */
 export const DATABRICKS_MODEL_NAMES: Map<string, string> = new Map([
+  ["databricks-gpt-5-4-mini", "GPT-5.4 mini"],
+  ["databricks-gpt-5-4-nano", "GPT-5.4 nano"],
+  ["databricks-gpt-5-6-sol", "GPT-5.6 Sol"],
+  ["databricks-gpt-5-5", "GPT-5.5"],
+  ["databricks-claude-opus-4-7", "Claude Opus 4.7"],
+  ["databricks-gpt-5-6-luna", "GPT-5.6 Luna"],
+  ["databricks-gpt-5-6-terra", "GPT-5.6 Terra"],
   ["databricks-claude-haiku-4-5", "Claude Haiku 4.5 (latest)"],
   ["databricks-claude-opus-4-1", "Claude Opus 4.1 (latest)"],
   ["databricks-claude-opus-4-5", "Claude Opus 4.5 (latest)"],
   ["databricks-claude-opus-4-6", "Claude Opus 4.6"],
-  ["databricks-claude-opus-4-7", "Claude Opus 4.7"],
   ["databricks-claude-sonnet-4", "Claude Sonnet 4.5"],
   ["databricks-claude-sonnet-4-5", "Claude Sonnet 4.5 (latest)"],
   ["databricks-claude-sonnet-4-6", "Claude Sonnet 4.6"],
@@ -70,12 +77,6 @@ export const DATABRICKS_MODEL_NAMES: Map<string, string> = new Map([
   ["databricks-gpt-5-1", "GPT-5.1"],
   ["databricks-gpt-5-2", "GPT-5.2"],
   ["databricks-gpt-5-4", "GPT-5.4"],
-  ["databricks-gpt-5-4-mini", "GPT-5.4 mini"],
-  ["databricks-gpt-5-4-nano", "GPT-5.4 nano"],
-  ["databricks-gpt-5-5", "GPT-5.5"],
-  ["databricks-gpt-5-6-luna", "GPT-5.6 Luna"],
-  ["databricks-gpt-5-6-sol", "GPT-5.6 Sol"],
-  ["databricks-gpt-5-6-terra", "GPT-5.6 Terra"],
   ["databricks-gpt-5-mini", "GPT-5 Mini"],
   ["databricks-gpt-5-nano", "GPT-5 Nano"],
   ["databricks-gpt-oss-120b", "GPT OSS 120B"],
@@ -147,7 +148,7 @@ function gptVersionSegmentMatchesGenerated(m: string, token: string): boolean {
 
 const EXACT_RECORDS = new Map<string, CapabilityResult>([
   ["databricks_v2::databricks-gpt-5-4-mini", {
-      registryLabel: "GPT-5.4 Mini",
+      registryLabel: "GPT-5.4 mini",
       thinkingMode: "none",
       supportedEfforts: ["low", "medium", "high"] as const,
       defaultEffort: "medium",
@@ -155,7 +156,7 @@ const EXACT_RECORDS = new Map<string, CapabilityResult>([
       normalizationPolicy: "openai-standard",
     }],
   ["databricks_v2::databricks-gpt-5-4-nano", {
-      registryLabel: "GPT-5.4 Nano",
+      registryLabel: "GPT-5.4 nano",
       thinkingMode: "none",
       supportedEfforts: ["low", "medium", "high"] as const,
       defaultEffort: "medium",
@@ -201,6 +202,190 @@ const EXACT_RECORDS = new Map<string, CapabilityResult>([
       defaultEffort: "medium",
       databricksV2WireRoute: "openai-responses",
       normalizationPolicy: "openai-standard",
+    }],
+  ["databricks_v2::databricks-claude-haiku-4-5", {
+      registryLabel: "Claude Haiku 4.5 (latest)",
+      thinkingMode: "omit-fields",
+      supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
+      defaultEffort: "high",
+      databricksV2WireRoute: "anthropic-messages",
+      normalizationPolicy: "none",
+    }],
+  ["databricks_v2::databricks-claude-opus-4-1", {
+      registryLabel: "Claude Opus 4.1 (latest)",
+      thinkingMode: "omit-fields",
+      supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
+      defaultEffort: "high",
+      databricksV2WireRoute: "anthropic-messages",
+      normalizationPolicy: "none",
+    }],
+  ["databricks_v2::databricks-claude-opus-4-5", {
+      registryLabel: "Claude Opus 4.5 (latest)",
+      thinkingMode: "manual-budget",
+      supportedEfforts: ["low", "medium", "high"] as const,
+      defaultEffort: null,
+      databricksV2WireRoute: "anthropic-messages",
+      normalizationPolicy: "none",
+    }],
+  ["databricks_v2::databricks-claude-opus-4-6", {
+      registryLabel: "Claude Opus 4.6",
+      thinkingMode: "adaptive",
+      supportedEfforts: ["low", "medium", "high", "max"] as const,
+      defaultEffort: "high",
+      databricksV2WireRoute: "anthropic-messages",
+      normalizationPolicy: "none",
+    }],
+  ["databricks_v2::databricks-claude-sonnet-4", {
+      registryLabel: "Claude Sonnet 4.5",
+      thinkingMode: "omit-fields",
+      supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
+      defaultEffort: "high",
+      databricksV2WireRoute: "anthropic-messages",
+      normalizationPolicy: "none",
+    }],
+  ["databricks_v2::databricks-claude-sonnet-4-5", {
+      registryLabel: "Claude Sonnet 4.5 (latest)",
+      thinkingMode: "omit-fields",
+      supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
+      defaultEffort: "high",
+      databricksV2WireRoute: "anthropic-messages",
+      normalizationPolicy: "none",
+    }],
+  ["databricks_v2::databricks-claude-sonnet-4-6", {
+      registryLabel: "Claude Sonnet 4.6",
+      thinkingMode: "adaptive",
+      supportedEfforts: ["low", "medium", "high", "max"] as const,
+      defaultEffort: "high",
+      databricksV2WireRoute: "anthropic-messages",
+      normalizationPolicy: "none",
+    }],
+  ["databricks_v2::databricks-gemini-2-5-flash", {
+      registryLabel: "Gemini 2.5 Flash",
+      thinkingMode: "none",
+      supportedEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "mlflow-chat",
+      normalizationPolicy: "openai-clamp-max-to-xhigh",
+    }],
+  ["databricks_v2::databricks-gemini-2-5-pro", {
+      registryLabel: "Gemini 2.5 Pro",
+      thinkingMode: "none",
+      supportedEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "mlflow-chat",
+      normalizationPolicy: "openai-clamp-max-to-xhigh",
+    }],
+  ["databricks_v2::databricks-gemini-3-1-flash-lite", {
+      registryLabel: "Gemini 3.1 Flash Lite Preview",
+      thinkingMode: "none",
+      supportedEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "mlflow-chat",
+      normalizationPolicy: "openai-clamp-max-to-xhigh",
+    }],
+  ["databricks_v2::databricks-gemini-3-1-pro", {
+      registryLabel: "Gemini 3.1 Pro Preview Custom Tools",
+      thinkingMode: "none",
+      supportedEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "mlflow-chat",
+      normalizationPolicy: "openai-clamp-max-to-xhigh",
+    }],
+  ["databricks_v2::databricks-gemini-3-flash", {
+      registryLabel: "Gemini 3 Flash Preview",
+      thinkingMode: "none",
+      supportedEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "mlflow-chat",
+      normalizationPolicy: "openai-clamp-max-to-xhigh",
+    }],
+  ["databricks_v2::databricks-gemini-3-pro", {
+      registryLabel: "Gemini 3 Pro Preview",
+      thinkingMode: "none",
+      supportedEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "mlflow-chat",
+      normalizationPolicy: "openai-clamp-max-to-xhigh",
+    }],
+  ["databricks_v2::databricks-glm-5-2", {
+      registryLabel: "GLM-5.2",
+      thinkingMode: "none",
+      supportedEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "mlflow-chat",
+      normalizationPolicy: "openai-clamp-max-to-xhigh",
+    }],
+  ["databricks_v2::databricks-gpt-5", {
+      registryLabel: "GPT-5",
+      thinkingMode: "none",
+      supportedEfforts: ["minimal", "low", "medium", "high"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "openai-responses",
+      normalizationPolicy: "openai-standard",
+    }],
+  ["databricks_v2::databricks-gpt-5-1", {
+      registryLabel: "GPT-5.1",
+      thinkingMode: "none",
+      supportedEfforts: ["none", "low", "medium", "high"] as const,
+      defaultEffort: "none",
+      databricksV2WireRoute: "openai-responses",
+      normalizationPolicy: "openai-standard",
+    }],
+  ["databricks_v2::databricks-gpt-5-2", {
+      registryLabel: "GPT-5.2",
+      thinkingMode: "none",
+      supportedEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "openai-responses",
+      normalizationPolicy: "openai-clamp-max-to-xhigh",
+    }],
+  ["databricks_v2::databricks-gpt-5-4", {
+      registryLabel: "GPT-5.4",
+      thinkingMode: "none",
+      supportedEfforts: ["none", "low", "medium", "high", "xhigh"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "openai-responses",
+      normalizationPolicy: "openai-standard",
+    }],
+  ["databricks_v2::databricks-gpt-5-mini", {
+      registryLabel: "GPT-5 Mini",
+      thinkingMode: "none",
+      supportedEfforts: ["minimal", "low", "medium", "high"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "openai-responses",
+      normalizationPolicy: "openai-standard",
+    }],
+  ["databricks_v2::databricks-gpt-5-nano", {
+      registryLabel: "GPT-5 Nano",
+      thinkingMode: "none",
+      supportedEfforts: ["minimal", "low", "medium", "high"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "openai-responses",
+      normalizationPolicy: "openai-standard",
+    }],
+  ["databricks_v2::databricks-gpt-oss-120b", {
+      registryLabel: "GPT OSS 120B",
+      thinkingMode: "none",
+      supportedEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "mlflow-chat",
+      normalizationPolicy: "openai-clamp-max-to-xhigh",
+    }],
+  ["databricks_v2::databricks-gpt-oss-20b", {
+      registryLabel: "GPT OSS 20B",
+      thinkingMode: "none",
+      supportedEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "mlflow-chat",
+      normalizationPolicy: "openai-clamp-max-to-xhigh",
+    }],
+  ["databricks_v2::databricks-kimi-k2-7-code", {
+      registryLabel: "Kimi K2.7 Code",
+      thinkingMode: "none",
+      supportedEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "mlflow-chat",
+      normalizationPolicy: "openai-clamp-max-to-xhigh",
     }],
 ]);
 
@@ -353,7 +538,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-pro, provider: openai, priority: 20
   if (provider === "openai" && (gpt5TokenMatchesGenerated(lower, "gpt-5-pro") || gpt5TokenMatchesGenerated(lower, "gpt5-pro"))) {
     return {
-          registryLabel: "GPT-5 Pro",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["high"] as const,
           defaultEffort: "high",
@@ -364,7 +549,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-pro, provider: databricks, priority: 20
   if (provider === "databricks" && (gpt5TokenMatchesGenerated(lower, "gpt-5-pro") || gpt5TokenMatchesGenerated(lower, "gpt5-pro"))) {
     return {
-          registryLabel: "GPT-5 Pro",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["high"] as const,
           defaultEffort: "high",
@@ -375,7 +560,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-pro, provider: databricks_v2, priority: 20
   if (provider === "databricks_v2" && (gpt5TokenMatchesGenerated(lower, "gpt-5-pro") || gpt5TokenMatchesGenerated(lower, "gpt5-pro"))) {
     return {
-          registryLabel: "GPT-5 Pro",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["high"] as const,
           defaultEffort: "high",
@@ -386,7 +571,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-6, provider: openai, priority: 15
   if (provider === "openai" && (gpt5TokenMatchesGenerated(lower, "gpt-5.6") || gpt5TokenMatchesGenerated(lower, "gpt5.6") || gpt5TokenMatchesGenerated(lower, "gpt-5-6") || gpt5TokenMatchesGenerated(lower, "gpt5-6"))) {
     return {
-          registryLabel: "GPT-5.6",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["none", "low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "medium",
@@ -397,7 +582,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-6, provider: databricks, priority: 15
   if (provider === "databricks" && (gpt5TokenMatchesGenerated(lower, "gpt-5.6") || gpt5TokenMatchesGenerated(lower, "gpt5.6") || gpt5TokenMatchesGenerated(lower, "gpt-5-6") || gpt5TokenMatchesGenerated(lower, "gpt5-6"))) {
     return {
-          registryLabel: "GPT-5.6",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["none", "low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "medium",
@@ -408,7 +593,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-6, provider: databricks_v2, priority: 15
   if (provider === "databricks_v2" && (gpt5TokenMatchesGenerated(lower, "gpt-5.6") || gpt5TokenMatchesGenerated(lower, "gpt5.6") || gpt5TokenMatchesGenerated(lower, "gpt-5-6") || gpt5TokenMatchesGenerated(lower, "gpt5-6"))) {
     return {
-          registryLabel: "GPT-5.6",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["none", "low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "medium",
@@ -419,7 +604,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-5, provider: openai, priority: 15
   if (provider === "openai" && (gpt5TokenMatchesGenerated(lower, "gpt-5.5") || gpt5TokenMatchesGenerated(lower, "gpt5.5") || gpt5TokenMatchesGenerated(lower, "gpt-5-5") || gpt5TokenMatchesGenerated(lower, "gpt5-5"))) {
     return {
-          registryLabel: "GPT-5.5",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["none", "low", "medium", "high", "xhigh"] as const,
           defaultEffort: "medium",
@@ -430,7 +615,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-5, provider: databricks, priority: 15
   if (provider === "databricks" && (gpt5TokenMatchesGenerated(lower, "gpt-5.5") || gpt5TokenMatchesGenerated(lower, "gpt5.5") || gpt5TokenMatchesGenerated(lower, "gpt-5-5") || gpt5TokenMatchesGenerated(lower, "gpt5-5"))) {
     return {
-          registryLabel: "GPT-5.5",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["none", "low", "medium", "high", "xhigh"] as const,
           defaultEffort: "medium",
@@ -441,7 +626,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-5, provider: databricks_v2, priority: 15
   if (provider === "databricks_v2" && (gpt5TokenMatchesGenerated(lower, "gpt-5.5") || gpt5TokenMatchesGenerated(lower, "gpt5.5") || gpt5TokenMatchesGenerated(lower, "gpt-5-5") || gpt5TokenMatchesGenerated(lower, "gpt5-5"))) {
     return {
-          registryLabel: "GPT-5.5",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["none", "low", "medium", "high", "xhigh"] as const,
           defaultEffort: "medium",
@@ -452,7 +637,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-4, provider: openai, priority: 15
   if (provider === "openai" && (gpt5TokenMatchesGenerated(lower, "gpt-5.4") || gpt5TokenMatchesGenerated(lower, "gpt5.4") || gpt5TokenMatchesGenerated(lower, "gpt-5-4") || gpt5TokenMatchesGenerated(lower, "gpt5-4"))) {
     return {
-          registryLabel: "GPT-5.4",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["none", "low", "medium", "high", "xhigh"] as const,
           defaultEffort: "medium",
@@ -463,7 +648,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-4, provider: databricks, priority: 15
   if (provider === "databricks" && (gpt5TokenMatchesGenerated(lower, "gpt-5.4") || gpt5TokenMatchesGenerated(lower, "gpt5.4") || gpt5TokenMatchesGenerated(lower, "gpt-5-4") || gpt5TokenMatchesGenerated(lower, "gpt5-4"))) {
     return {
-          registryLabel: "GPT-5.4",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["none", "low", "medium", "high", "xhigh"] as const,
           defaultEffort: "medium",
@@ -474,7 +659,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-4, provider: databricks_v2, priority: 15
   if (provider === "databricks_v2" && (gpt5TokenMatchesGenerated(lower, "gpt-5.4") || gpt5TokenMatchesGenerated(lower, "gpt5.4") || gpt5TokenMatchesGenerated(lower, "gpt-5-4") || gpt5TokenMatchesGenerated(lower, "gpt5-4"))) {
     return {
-          registryLabel: "GPT-5.4",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["none", "low", "medium", "high", "xhigh"] as const,
           defaultEffort: "medium",
@@ -485,7 +670,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-1, provider: openai, priority: 15
   if (provider === "openai" && (gpt5TokenMatchesGenerated(lower, "gpt-5.1") || gpt5TokenMatchesGenerated(lower, "gpt5.1") || gpt5TokenMatchesGenerated(lower, "gpt-5-1") || gpt5TokenMatchesGenerated(lower, "gpt5-1"))) {
     return {
-          registryLabel: "GPT-5.1",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["none", "low", "medium", "high"] as const,
           defaultEffort: "none",
@@ -496,7 +681,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-1, provider: databricks, priority: 15
   if (provider === "databricks" && (gpt5TokenMatchesGenerated(lower, "gpt-5.1") || gpt5TokenMatchesGenerated(lower, "gpt5.1") || gpt5TokenMatchesGenerated(lower, "gpt-5-1") || gpt5TokenMatchesGenerated(lower, "gpt5-1"))) {
     return {
-          registryLabel: "GPT-5.1",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["none", "low", "medium", "high"] as const,
           defaultEffort: "none",
@@ -507,7 +692,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-1, provider: databricks_v2, priority: 15
   if (provider === "databricks_v2" && (gpt5TokenMatchesGenerated(lower, "gpt-5.1") || gpt5TokenMatchesGenerated(lower, "gpt5.1") || gpt5TokenMatchesGenerated(lower, "gpt-5-1") || gpt5TokenMatchesGenerated(lower, "gpt5-1"))) {
     return {
-          registryLabel: "GPT-5.1",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["none", "low", "medium", "high"] as const,
           defaultEffort: "none",
@@ -540,7 +725,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-manual-budget-opus-4-5, provider: anthropic, priority: 10
   if (provider === "anthropic" && (lower === "claude-opus-4-5")) {
     return {
-          registryLabel: "Claude Opus 4.5",
+          registryLabel: null,
           thinkingMode: "manual-budget",
           supportedEfforts: ["low", "medium", "high"] as const,
           defaultEffort: null,
@@ -551,7 +736,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-manual-budget-opus-4-5, provider: databricks_v2, priority: 10
   if (provider === "databricks_v2" && (lower === "claude-opus-4-5")) {
     return {
-          registryLabel: "Claude Opus 4.5",
+          registryLabel: null,
           thinkingMode: "manual-budget",
           supportedEfforts: ["low", "medium", "high"] as const,
           defaultEffort: null,
@@ -562,7 +747,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-xhigh-opus-4-7, provider: anthropic, priority: 10
   if (provider === "anthropic" && (lower.startsWith("claude-opus-4-7"))) {
     return {
-          registryLabel: "Claude Opus 4.7",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "high",
@@ -573,7 +758,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-xhigh-opus-4-7, provider: databricks_v2, priority: 10
   if (provider === "databricks_v2" && (lower.startsWith("claude-opus-4-7"))) {
     return {
-          registryLabel: "Claude Opus 4.7",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "high",
@@ -584,7 +769,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-xhigh-opus-4-8, provider: anthropic, priority: 10
   if (provider === "anthropic" && (lower.startsWith("claude-opus-4-8"))) {
     return {
-          registryLabel: "Claude Opus 4.8",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "high",
@@ -595,7 +780,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-xhigh-opus-4-8, provider: databricks_v2, priority: 10
   if (provider === "databricks_v2" && (lower.startsWith("claude-opus-4-8"))) {
     return {
-          registryLabel: "Claude Opus 4.8",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "high",
@@ -606,7 +791,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-xhigh-opus-5, provider: anthropic, priority: 10
   if (provider === "anthropic" && (lower.startsWith("claude-opus-5"))) {
     return {
-          registryLabel: "Claude Opus 5",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "high",
@@ -617,7 +802,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-xhigh-opus-5, provider: databricks_v2, priority: 10
   if (provider === "databricks_v2" && (lower.startsWith("claude-opus-5"))) {
     return {
-          registryLabel: "Claude Opus 5",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "high",
@@ -628,7 +813,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-xhigh-sonnet-5, provider: anthropic, priority: 10
   if (provider === "anthropic" && (lower.startsWith("claude-sonnet-5"))) {
     return {
-          registryLabel: "Claude Sonnet 5",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "high",
@@ -639,7 +824,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-xhigh-sonnet-5, provider: databricks_v2, priority: 10
   if (provider === "databricks_v2" && (lower.startsWith("claude-sonnet-5"))) {
     return {
-          registryLabel: "Claude Sonnet 5",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "high",
@@ -650,7 +835,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-xhigh-fable-5, provider: anthropic, priority: 10
   if (provider === "anthropic" && (lower.startsWith("claude-fable-5"))) {
     return {
-          registryLabel: "Claude Fable 5",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "high",
@@ -661,7 +846,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-xhigh-fable-5, provider: databricks_v2, priority: 10
   if (provider === "databricks_v2" && (lower.startsWith("claude-fable-5"))) {
     return {
-          registryLabel: "Claude Fable 5",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "high",
@@ -672,7 +857,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-xhigh-mythos-5, provider: anthropic, priority: 10
   if (provider === "anthropic" && (lower.startsWith("claude-mythos-5"))) {
     return {
-          registryLabel: "Claude Mythos 5",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "high",
@@ -683,7 +868,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-xhigh-mythos-5, provider: databricks_v2, priority: 10
   if (provider === "databricks_v2" && (lower.startsWith("claude-mythos-5"))) {
     return {
-          registryLabel: "Claude Mythos 5",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "xhigh", "max"] as const,
           defaultEffort: "high",
@@ -694,7 +879,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-no-xhigh-opus-4-6, provider: anthropic, priority: 10
   if (provider === "anthropic" && (lower.startsWith("claude-opus-4-6"))) {
     return {
-          registryLabel: "Claude Opus 4.6",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "max"] as const,
           defaultEffort: "high",
@@ -705,7 +890,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-no-xhigh-opus-4-6, provider: databricks_v2, priority: 10
   if (provider === "databricks_v2" && (lower.startsWith("claude-opus-4-6"))) {
     return {
-          registryLabel: "Claude Opus 4.6",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "max"] as const,
           defaultEffort: "high",
@@ -716,7 +901,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-no-xhigh-sonnet-4-6, provider: anthropic, priority: 10
   if (provider === "anthropic" && (lower.startsWith("claude-sonnet-4-6"))) {
     return {
-          registryLabel: "Claude Sonnet 4.6",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "max"] as const,
           defaultEffort: "high",
@@ -727,7 +912,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-no-xhigh-sonnet-4-6, provider: databricks_v2, priority: 10
   if (provider === "databricks_v2" && (lower.startsWith("claude-sonnet-4-6"))) {
     return {
-          registryLabel: "Claude Sonnet 4.6",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "max"] as const,
           defaultEffort: "high",
@@ -738,7 +923,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-no-xhigh-mythos-preview, provider: anthropic, priority: 10
   if (provider === "anthropic" && (lower.startsWith("claude-mythos-preview"))) {
     return {
-          registryLabel: "Claude Mythos Preview",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "max"] as const,
           defaultEffort: "high",
@@ -749,7 +934,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: anthropic-adaptive-no-xhigh-mythos-preview, provider: databricks_v2, priority: 10
   if (provider === "databricks_v2" && (lower.startsWith("claude-mythos-preview"))) {
     return {
-          registryLabel: "Claude Mythos Preview",
+          registryLabel: null,
           thinkingMode: "adaptive",
           supportedEfforts: ["low", "medium", "high", "max"] as const,
           defaultEffort: "high",
@@ -760,7 +945,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-base, provider: openai, priority: 10
   if (provider === "openai" && (gpt5BaseMatchesGenerated(lower, "gpt-5") || gpt5BaseMatchesGenerated(lower, "gpt5"))) {
     return {
-          registryLabel: "GPT-5",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["minimal", "low", "medium", "high"] as const,
           defaultEffort: "medium",
@@ -771,7 +956,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-base, provider: databricks, priority: 10
   if (provider === "databricks" && (gpt5BaseMatchesGenerated(lower, "gpt-5") || gpt5BaseMatchesGenerated(lower, "gpt5"))) {
     return {
-          registryLabel: "GPT-5",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["minimal", "low", "medium", "high"] as const,
           defaultEffort: "medium",
@@ -782,7 +967,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
   // rule: openai-gpt5-base, provider: databricks_v2, priority: 10
   if (provider === "databricks_v2" && (gpt5BaseMatchesGenerated(lower, "gpt-5") || gpt5BaseMatchesGenerated(lower, "gpt5"))) {
     return {
-          registryLabel: "GPT-5",
+          registryLabel: null,
           thinkingMode: "none",
           supportedEfforts: ["minimal", "low", "medium", "high"] as const,
           defaultEffort: "medium",

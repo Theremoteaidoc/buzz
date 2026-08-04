@@ -108,7 +108,7 @@ pub fn lookup_exact(provider: &str, raw_model_id: &str) -> Option<CapabilityResu
             //   normalization_policy: family:openai-gpt5-4@15
             //   default_effort: family:openai-gpt5-4@15
             Some(CapabilityResult {
-                registry_label: Some("GPT-5.4 Mini"),
+                registry_label: Some("GPT-5.4 mini"),
                 thinking_mode: ThinkingMode::None,
                 supported_efforts: Cow::Borrowed(&[
                     ThinkingEffort::Low,
@@ -129,7 +129,7 @@ pub fn lookup_exact(provider: &str, raw_model_id: &str) -> Option<CapabilityResu
             //   normalization_policy: family:openai-gpt5-4@15
             //   default_effort: family:openai-gpt5-4@15
             Some(CapabilityResult {
-                registry_label: Some("GPT-5.4 Nano"),
+                registry_label: Some("GPT-5.4 nano"),
                 thinking_mode: ThinkingMode::None,
                 supported_efforts: Cow::Borrowed(&[
                     ThinkingEffort::Low,
@@ -249,6 +249,538 @@ pub fn lookup_exact(provider: &str, raw_model_id: &str) -> Option<CapabilityResu
                 normalization_policy: NormalizationPolicy::OpenAiStandard,
             })
         }
+        ("databricks_v2", "databricks-claude-haiku-4-5") => {
+            // provenance: exact(databricks_v2::databricks-claude-haiku-4-5)
+            //   registry_label: exact_record
+            //   supported_efforts: family:dbv2-claude-code-names-segment@5
+            //   databricks_v2_wire_route: family:dbv2-claude-code-names-segment@5
+            //   thinking_mode: family:dbv2-claude-code-names-segment@5
+            //   normalization_policy: family:dbv2-claude-code-names-segment@5
+            //   default_effort: family:dbv2-claude-code-names-segment@5
+            Some(CapabilityResult {
+                registry_label: Some("Claude Haiku 4.5 (latest)"),
+                thinking_mode: ThinkingMode::OmitFields,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                    ThinkingEffort::Max,
+                ]),
+                default_effort: Some(ThinkingEffort::High),
+                databricks_v2_wire_route: DatabricksV2Route::AnthropicMessages,
+                normalization_policy: NormalizationPolicy::None,
+            })
+        }
+        ("databricks_v2", "databricks-claude-opus-4-1") => {
+            // provenance: exact(databricks_v2::databricks-claude-opus-4-1)
+            //   registry_label: exact_record
+            //   supported_efforts: family:dbv2-claude-code-names-segment@5
+            //   databricks_v2_wire_route: family:dbv2-claude-code-names-segment@5
+            //   thinking_mode: family:dbv2-claude-code-names-segment@5
+            //   normalization_policy: family:dbv2-claude-code-names-segment@5
+            //   default_effort: family:dbv2-claude-code-names-segment@5
+            Some(CapabilityResult {
+                registry_label: Some("Claude Opus 4.1 (latest)"),
+                thinking_mode: ThinkingMode::OmitFields,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                    ThinkingEffort::Max,
+                ]),
+                default_effort: Some(ThinkingEffort::High),
+                databricks_v2_wire_route: DatabricksV2Route::AnthropicMessages,
+                normalization_policy: NormalizationPolicy::None,
+            })
+        }
+        ("databricks_v2", "databricks-claude-opus-4-5") => {
+            // provenance: exact(databricks_v2::databricks-claude-opus-4-5)
+            //   registry_label: exact_record
+            //   supported_efforts: family:anthropic-manual-budget-opus-4-5@10
+            //   databricks_v2_wire_route: family:anthropic-manual-budget-opus-4-5@10
+            //   thinking_mode: family:anthropic-manual-budget-opus-4-5@10
+            //   normalization_policy: family:anthropic-manual-budget-opus-4-5@10
+            //   default_effort: family:anthropic-manual-budget-opus-4-5@10
+            Some(CapabilityResult {
+                registry_label: Some("Claude Opus 4.5 (latest)"),
+                thinking_mode: ThinkingMode::ManualBudget,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                ]),
+                default_effort: None,
+                databricks_v2_wire_route: DatabricksV2Route::AnthropicMessages,
+                normalization_policy: NormalizationPolicy::None,
+            })
+        }
+        ("databricks_v2", "databricks-claude-opus-4-6") => {
+            // provenance: exact(databricks_v2::databricks-claude-opus-4-6)
+            //   registry_label: exact_record
+            //   supported_efforts: family:anthropic-adaptive-no-xhigh-opus-4-6@10
+            //   databricks_v2_wire_route: family:anthropic-adaptive-no-xhigh-opus-4-6@10
+            //   thinking_mode: family:anthropic-adaptive-no-xhigh-opus-4-6@10
+            //   normalization_policy: family:anthropic-adaptive-no-xhigh-opus-4-6@10
+            //   default_effort: family:anthropic-adaptive-no-xhigh-opus-4-6@10
+            Some(CapabilityResult {
+                registry_label: Some("Claude Opus 4.6"),
+                thinking_mode: ThinkingMode::Adaptive,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::Max,
+                ]),
+                default_effort: Some(ThinkingEffort::High),
+                databricks_v2_wire_route: DatabricksV2Route::AnthropicMessages,
+                normalization_policy: NormalizationPolicy::None,
+            })
+        }
+        ("databricks_v2", "databricks-claude-sonnet-4") => {
+            // provenance: exact(databricks_v2::databricks-claude-sonnet-4)
+            //   registry_label: exact_record
+            //   supported_efforts: family:dbv2-claude-code-names-segment@5
+            //   databricks_v2_wire_route: family:dbv2-claude-code-names-segment@5
+            //   thinking_mode: family:dbv2-claude-code-names-segment@5
+            //   normalization_policy: family:dbv2-claude-code-names-segment@5
+            //   default_effort: family:dbv2-claude-code-names-segment@5
+            Some(CapabilityResult {
+                registry_label: Some("Claude Sonnet 4.5"),
+                thinking_mode: ThinkingMode::OmitFields,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                    ThinkingEffort::Max,
+                ]),
+                default_effort: Some(ThinkingEffort::High),
+                databricks_v2_wire_route: DatabricksV2Route::AnthropicMessages,
+                normalization_policy: NormalizationPolicy::None,
+            })
+        }
+        ("databricks_v2", "databricks-claude-sonnet-4-5") => {
+            // provenance: exact(databricks_v2::databricks-claude-sonnet-4-5)
+            //   registry_label: exact_record
+            //   supported_efforts: family:dbv2-claude-code-names-segment@5
+            //   databricks_v2_wire_route: family:dbv2-claude-code-names-segment@5
+            //   thinking_mode: family:dbv2-claude-code-names-segment@5
+            //   normalization_policy: family:dbv2-claude-code-names-segment@5
+            //   default_effort: family:dbv2-claude-code-names-segment@5
+            Some(CapabilityResult {
+                registry_label: Some("Claude Sonnet 4.5 (latest)"),
+                thinking_mode: ThinkingMode::OmitFields,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                    ThinkingEffort::Max,
+                ]),
+                default_effort: Some(ThinkingEffort::High),
+                databricks_v2_wire_route: DatabricksV2Route::AnthropicMessages,
+                normalization_policy: NormalizationPolicy::None,
+            })
+        }
+        ("databricks_v2", "databricks-claude-sonnet-4-6") => {
+            // provenance: exact(databricks_v2::databricks-claude-sonnet-4-6)
+            //   registry_label: exact_record
+            //   supported_efforts: family:anthropic-adaptive-no-xhigh-sonnet-4-6@10
+            //   databricks_v2_wire_route: family:anthropic-adaptive-no-xhigh-sonnet-4-6@10
+            //   thinking_mode: family:anthropic-adaptive-no-xhigh-sonnet-4-6@10
+            //   normalization_policy: family:anthropic-adaptive-no-xhigh-sonnet-4-6@10
+            //   default_effort: family:anthropic-adaptive-no-xhigh-sonnet-4-6@10
+            Some(CapabilityResult {
+                registry_label: Some("Claude Sonnet 4.6"),
+                thinking_mode: ThinkingMode::Adaptive,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::Max,
+                ]),
+                default_effort: Some(ThinkingEffort::High),
+                databricks_v2_wire_route: DatabricksV2Route::AnthropicMessages,
+                normalization_policy: NormalizationPolicy::None,
+            })
+        }
+        ("databricks_v2", "databricks-gemini-2-5-flash") => {
+            // provenance: exact(databricks_v2::databricks-gemini-2-5-flash)
+            //   registry_label: exact_record
+            //   supported_efforts: fallback
+            //   databricks_v2_wire_route: fallback
+            //   thinking_mode: fallback
+            //   normalization_policy: fallback
+            //   default_effort: fallback
+            Some(CapabilityResult {
+                registry_label: Some("Gemini 2.5 Flash"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::None,
+                    ThinkingEffort::Minimal,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::MlflowChatCompletions,
+                normalization_policy: NormalizationPolicy::OpenAiClampMaxToXHigh,
+            })
+        }
+        ("databricks_v2", "databricks-gemini-2-5-pro") => {
+            // provenance: exact(databricks_v2::databricks-gemini-2-5-pro)
+            //   registry_label: exact_record
+            //   supported_efforts: fallback
+            //   databricks_v2_wire_route: fallback
+            //   thinking_mode: fallback
+            //   normalization_policy: fallback
+            //   default_effort: fallback
+            Some(CapabilityResult {
+                registry_label: Some("Gemini 2.5 Pro"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::None,
+                    ThinkingEffort::Minimal,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::MlflowChatCompletions,
+                normalization_policy: NormalizationPolicy::OpenAiClampMaxToXHigh,
+            })
+        }
+        ("databricks_v2", "databricks-gemini-3-1-flash-lite") => {
+            // provenance: exact(databricks_v2::databricks-gemini-3-1-flash-lite)
+            //   registry_label: exact_record
+            //   supported_efforts: fallback
+            //   databricks_v2_wire_route: fallback
+            //   thinking_mode: fallback
+            //   normalization_policy: fallback
+            //   default_effort: fallback
+            Some(CapabilityResult {
+                registry_label: Some("Gemini 3.1 Flash Lite Preview"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::None,
+                    ThinkingEffort::Minimal,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::MlflowChatCompletions,
+                normalization_policy: NormalizationPolicy::OpenAiClampMaxToXHigh,
+            })
+        }
+        ("databricks_v2", "databricks-gemini-3-1-pro") => {
+            // provenance: exact(databricks_v2::databricks-gemini-3-1-pro)
+            //   registry_label: exact_record
+            //   supported_efforts: fallback
+            //   databricks_v2_wire_route: fallback
+            //   thinking_mode: fallback
+            //   normalization_policy: fallback
+            //   default_effort: fallback
+            Some(CapabilityResult {
+                registry_label: Some("Gemini 3.1 Pro Preview Custom Tools"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::None,
+                    ThinkingEffort::Minimal,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::MlflowChatCompletions,
+                normalization_policy: NormalizationPolicy::OpenAiClampMaxToXHigh,
+            })
+        }
+        ("databricks_v2", "databricks-gemini-3-flash") => {
+            // provenance: exact(databricks_v2::databricks-gemini-3-flash)
+            //   registry_label: exact_record
+            //   supported_efforts: fallback
+            //   databricks_v2_wire_route: fallback
+            //   thinking_mode: fallback
+            //   normalization_policy: fallback
+            //   default_effort: fallback
+            Some(CapabilityResult {
+                registry_label: Some("Gemini 3 Flash Preview"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::None,
+                    ThinkingEffort::Minimal,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::MlflowChatCompletions,
+                normalization_policy: NormalizationPolicy::OpenAiClampMaxToXHigh,
+            })
+        }
+        ("databricks_v2", "databricks-gemini-3-pro") => {
+            // provenance: exact(databricks_v2::databricks-gemini-3-pro)
+            //   registry_label: exact_record
+            //   supported_efforts: fallback
+            //   databricks_v2_wire_route: fallback
+            //   thinking_mode: fallback
+            //   normalization_policy: fallback
+            //   default_effort: fallback
+            Some(CapabilityResult {
+                registry_label: Some("Gemini 3 Pro Preview"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::None,
+                    ThinkingEffort::Minimal,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::MlflowChatCompletions,
+                normalization_policy: NormalizationPolicy::OpenAiClampMaxToXHigh,
+            })
+        }
+        ("databricks_v2", "databricks-glm-5-2") => {
+            // provenance: exact(databricks_v2::databricks-glm-5-2)
+            //   registry_label: exact_record
+            //   supported_efforts: fallback
+            //   databricks_v2_wire_route: fallback
+            //   thinking_mode: fallback
+            //   normalization_policy: fallback
+            //   default_effort: fallback
+            Some(CapabilityResult {
+                registry_label: Some("GLM-5.2"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::None,
+                    ThinkingEffort::Minimal,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::MlflowChatCompletions,
+                normalization_policy: NormalizationPolicy::OpenAiClampMaxToXHigh,
+            })
+        }
+        ("databricks_v2", "databricks-gpt-5") => {
+            // provenance: exact(databricks_v2::databricks-gpt-5)
+            //   registry_label: exact_record
+            //   supported_efforts: family:openai-gpt5-base@10
+            //   databricks_v2_wire_route: family:openai-gpt5-base@10
+            //   thinking_mode: family:openai-gpt5-base@10
+            //   normalization_policy: family:openai-gpt5-base@10
+            //   default_effort: family:openai-gpt5-base@10
+            Some(CapabilityResult {
+                registry_label: Some("GPT-5"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::Minimal,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::OpenAiResponses,
+                normalization_policy: NormalizationPolicy::OpenAiStandard,
+            })
+        }
+        ("databricks_v2", "databricks-gpt-5-1") => {
+            // provenance: exact(databricks_v2::databricks-gpt-5-1)
+            //   registry_label: exact_record
+            //   supported_efforts: family:openai-gpt5-1@15
+            //   databricks_v2_wire_route: family:openai-gpt5-1@15
+            //   thinking_mode: family:openai-gpt5-1@15
+            //   normalization_policy: family:openai-gpt5-1@15
+            //   default_effort: family:openai-gpt5-1@15
+            Some(CapabilityResult {
+                registry_label: Some("GPT-5.1"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::None,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                ]),
+                default_effort: Some(ThinkingEffort::None),
+                databricks_v2_wire_route: DatabricksV2Route::OpenAiResponses,
+                normalization_policy: NormalizationPolicy::OpenAiStandard,
+            })
+        }
+        ("databricks_v2", "databricks-gpt-5-2") => {
+            // provenance: exact(databricks_v2::databricks-gpt-5-2)
+            //   registry_label: exact_record
+            //   supported_efforts: family:dbv2-gpt-code-names-segment@6
+            //   databricks_v2_wire_route: family:dbv2-gpt-code-names-segment@6
+            //   thinking_mode: family:dbv2-gpt-code-names-segment@6
+            //   normalization_policy: family:dbv2-gpt-code-names-segment@6
+            //   default_effort: family:dbv2-gpt-code-names-segment@6
+            Some(CapabilityResult {
+                registry_label: Some("GPT-5.2"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::None,
+                    ThinkingEffort::Minimal,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::OpenAiResponses,
+                normalization_policy: NormalizationPolicy::OpenAiClampMaxToXHigh,
+            })
+        }
+        ("databricks_v2", "databricks-gpt-5-4") => {
+            // provenance: exact(databricks_v2::databricks-gpt-5-4)
+            //   registry_label: exact_record
+            //   supported_efforts: family:openai-gpt5-4@15
+            //   databricks_v2_wire_route: family:openai-gpt5-4@15
+            //   thinking_mode: family:openai-gpt5-4@15
+            //   normalization_policy: family:openai-gpt5-4@15
+            //   default_effort: family:openai-gpt5-4@15
+            Some(CapabilityResult {
+                registry_label: Some("GPT-5.4"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::None,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::OpenAiResponses,
+                normalization_policy: NormalizationPolicy::OpenAiStandard,
+            })
+        }
+        ("databricks_v2", "databricks-gpt-5-mini") => {
+            // provenance: exact(databricks_v2::databricks-gpt-5-mini)
+            //   registry_label: exact_record
+            //   supported_efforts: family:openai-gpt5-base@10
+            //   databricks_v2_wire_route: family:openai-gpt5-base@10
+            //   thinking_mode: family:openai-gpt5-base@10
+            //   normalization_policy: family:openai-gpt5-base@10
+            //   default_effort: family:openai-gpt5-base@10
+            Some(CapabilityResult {
+                registry_label: Some("GPT-5 Mini"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::Minimal,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::OpenAiResponses,
+                normalization_policy: NormalizationPolicy::OpenAiStandard,
+            })
+        }
+        ("databricks_v2", "databricks-gpt-5-nano") => {
+            // provenance: exact(databricks_v2::databricks-gpt-5-nano)
+            //   registry_label: exact_record
+            //   supported_efforts: family:openai-gpt5-base@10
+            //   databricks_v2_wire_route: family:openai-gpt5-base@10
+            //   thinking_mode: family:openai-gpt5-base@10
+            //   normalization_policy: family:openai-gpt5-base@10
+            //   default_effort: family:openai-gpt5-base@10
+            Some(CapabilityResult {
+                registry_label: Some("GPT-5 Nano"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::Minimal,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::OpenAiResponses,
+                normalization_policy: NormalizationPolicy::OpenAiStandard,
+            })
+        }
+        ("databricks_v2", "databricks-gpt-oss-120b") => {
+            // provenance: exact(databricks_v2::databricks-gpt-oss-120b)
+            //   registry_label: exact_record
+            //   supported_efforts: fallback
+            //   databricks_v2_wire_route: fallback
+            //   thinking_mode: fallback
+            //   normalization_policy: fallback
+            //   default_effort: fallback
+            Some(CapabilityResult {
+                registry_label: Some("GPT OSS 120B"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::None,
+                    ThinkingEffort::Minimal,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::MlflowChatCompletions,
+                normalization_policy: NormalizationPolicy::OpenAiClampMaxToXHigh,
+            })
+        }
+        ("databricks_v2", "databricks-gpt-oss-20b") => {
+            // provenance: exact(databricks_v2::databricks-gpt-oss-20b)
+            //   registry_label: exact_record
+            //   supported_efforts: fallback
+            //   databricks_v2_wire_route: fallback
+            //   thinking_mode: fallback
+            //   normalization_policy: fallback
+            //   default_effort: fallback
+            Some(CapabilityResult {
+                registry_label: Some("GPT OSS 20B"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::None,
+                    ThinkingEffort::Minimal,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::MlflowChatCompletions,
+                normalization_policy: NormalizationPolicy::OpenAiClampMaxToXHigh,
+            })
+        }
+        ("databricks_v2", "databricks-kimi-k2-7-code") => {
+            // provenance: exact(databricks_v2::databricks-kimi-k2-7-code)
+            //   registry_label: exact_record
+            //   supported_efforts: fallback
+            //   databricks_v2_wire_route: fallback
+            //   thinking_mode: fallback
+            //   normalization_policy: fallback
+            //   default_effort: fallback
+            Some(CapabilityResult {
+                registry_label: Some("Kimi K2.7 Code"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::None,
+                    ThinkingEffort::Minimal,
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                    ThinkingEffort::XHigh,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::MlflowChatCompletions,
+                normalization_policy: NormalizationPolicy::OpenAiClampMaxToXHigh,
+            })
+        }
         _ => None,
     }
 }
@@ -320,7 +852,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
         && (gpt5_token_matches_rs(lower, "gpt-5-pro") || gpt5_token_matches_rs(lower, "gpt5-pro"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5 Pro"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[ThinkingEffort::High]),
             default_effort: Some(ThinkingEffort::High),
@@ -333,7 +865,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
         && (gpt5_token_matches_rs(lower, "gpt-5-pro") || gpt5_token_matches_rs(lower, "gpt5-pro"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5 Pro"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[ThinkingEffort::High]),
             default_effort: Some(ThinkingEffort::High),
@@ -346,7 +878,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
         && (gpt5_token_matches_rs(lower, "gpt-5-pro") || gpt5_token_matches_rs(lower, "gpt5-pro"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5 Pro"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[ThinkingEffort::High]),
             default_effort: Some(ThinkingEffort::High),
@@ -362,7 +894,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
             || gpt5_token_matches_rs(lower, "gpt5-6"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5.6"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::None,
@@ -385,7 +917,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
             || gpt5_token_matches_rs(lower, "gpt5-6"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5.6"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::None,
@@ -408,7 +940,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
             || gpt5_token_matches_rs(lower, "gpt5-6"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5.6"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::None,
@@ -431,7 +963,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
             || gpt5_token_matches_rs(lower, "gpt5-5"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5.5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::None,
@@ -453,7 +985,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
             || gpt5_token_matches_rs(lower, "gpt5-5"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5.5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::None,
@@ -475,7 +1007,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
             || gpt5_token_matches_rs(lower, "gpt5-5"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5.5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::None,
@@ -497,7 +1029,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
             || gpt5_token_matches_rs(lower, "gpt5-4"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5.4"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::None,
@@ -519,7 +1051,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
             || gpt5_token_matches_rs(lower, "gpt5-4"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5.4"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::None,
@@ -541,7 +1073,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
             || gpt5_token_matches_rs(lower, "gpt5-4"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5.4"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::None,
@@ -563,7 +1095,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
             || gpt5_token_matches_rs(lower, "gpt5-1"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5.1"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::None,
@@ -584,7 +1116,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
             || gpt5_token_matches_rs(lower, "gpt5-1"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5.1"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::None,
@@ -605,7 +1137,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
             || gpt5_token_matches_rs(lower, "gpt5-1"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5.1"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::None,
@@ -651,7 +1183,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-manual-budget-opus-4-5, provider: anthropic, priority: 10
     if provider == "anthropic" && (lower == "claude-opus-4-5") {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Opus 4.5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::ManualBudget,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -666,7 +1198,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-manual-budget-opus-4-5, provider: databricks_v2, priority: 10
     if provider == "databricks_v2" && (lower == "claude-opus-4-5") {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Opus 4.5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::ManualBudget,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -681,7 +1213,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-xhigh-opus-4-7, provider: anthropic, priority: 10
     if provider == "anthropic" && (lower.starts_with("claude-opus-4-7")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Opus 4.7"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -698,7 +1230,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-xhigh-opus-4-7, provider: databricks_v2, priority: 10
     if provider == "databricks_v2" && (lower.starts_with("claude-opus-4-7")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Opus 4.7"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -715,7 +1247,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-xhigh-opus-4-8, provider: anthropic, priority: 10
     if provider == "anthropic" && (lower.starts_with("claude-opus-4-8")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Opus 4.8"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -732,7 +1264,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-xhigh-opus-4-8, provider: databricks_v2, priority: 10
     if provider == "databricks_v2" && (lower.starts_with("claude-opus-4-8")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Opus 4.8"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -749,7 +1281,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-xhigh-opus-5, provider: anthropic, priority: 10
     if provider == "anthropic" && (lower.starts_with("claude-opus-5")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Opus 5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -766,7 +1298,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-xhigh-opus-5, provider: databricks_v2, priority: 10
     if provider == "databricks_v2" && (lower.starts_with("claude-opus-5")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Opus 5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -783,7 +1315,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-xhigh-sonnet-5, provider: anthropic, priority: 10
     if provider == "anthropic" && (lower.starts_with("claude-sonnet-5")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Sonnet 5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -800,7 +1332,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-xhigh-sonnet-5, provider: databricks_v2, priority: 10
     if provider == "databricks_v2" && (lower.starts_with("claude-sonnet-5")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Sonnet 5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -817,7 +1349,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-xhigh-fable-5, provider: anthropic, priority: 10
     if provider == "anthropic" && (lower.starts_with("claude-fable-5")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Fable 5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -834,7 +1366,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-xhigh-fable-5, provider: databricks_v2, priority: 10
     if provider == "databricks_v2" && (lower.starts_with("claude-fable-5")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Fable 5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -851,7 +1383,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-xhigh-mythos-5, provider: anthropic, priority: 10
     if provider == "anthropic" && (lower.starts_with("claude-mythos-5")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Mythos 5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -868,7 +1400,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-xhigh-mythos-5, provider: databricks_v2, priority: 10
     if provider == "databricks_v2" && (lower.starts_with("claude-mythos-5")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Mythos 5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -885,7 +1417,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-no-xhigh-opus-4-6, provider: anthropic, priority: 10
     if provider == "anthropic" && (lower.starts_with("claude-opus-4-6")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Opus 4.6"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -901,7 +1433,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-no-xhigh-opus-4-6, provider: databricks_v2, priority: 10
     if provider == "databricks_v2" && (lower.starts_with("claude-opus-4-6")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Opus 4.6"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -917,7 +1449,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-no-xhigh-sonnet-4-6, provider: anthropic, priority: 10
     if provider == "anthropic" && (lower.starts_with("claude-sonnet-4-6")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Sonnet 4.6"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -933,7 +1465,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-no-xhigh-sonnet-4-6, provider: databricks_v2, priority: 10
     if provider == "databricks_v2" && (lower.starts_with("claude-sonnet-4-6")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Sonnet 4.6"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -949,7 +1481,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-no-xhigh-mythos-preview, provider: anthropic, priority: 10
     if provider == "anthropic" && (lower.starts_with("claude-mythos-preview")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Mythos Preview"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -965,7 +1497,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     // rule: anthropic-adaptive-no-xhigh-mythos-preview, provider: databricks_v2, priority: 10
     if provider == "databricks_v2" && (lower.starts_with("claude-mythos-preview")) {
         return Some(CapabilityResult {
-            registry_label: Some("Claude Mythos Preview"),
+            registry_label: None,
             thinking_mode: ThinkingMode::Adaptive,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Low,
@@ -983,7 +1515,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
         && (gpt5_base_matches_rs(lower, "gpt-5") || gpt5_base_matches_rs(lower, "gpt5"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Minimal,
@@ -1001,7 +1533,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
         && (gpt5_base_matches_rs(lower, "gpt-5") || gpt5_base_matches_rs(lower, "gpt5"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Minimal,
@@ -1019,7 +1551,7 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
         && (gpt5_base_matches_rs(lower, "gpt-5") || gpt5_base_matches_rs(lower, "gpt5"))
     {
         return Some(CapabilityResult {
-            registry_label: Some("GPT-5"),
+            registry_label: None,
             thinking_mode: ThinkingMode::None,
             supported_efforts: Cow::Borrowed(&[
                 ThinkingEffort::Minimal,
@@ -1362,15 +1894,22 @@ pub const THINKING_EFFORT_VALUES: &[&str] =
 pub const DATABRICKS_V2_KNOWN_MODELS: &[&str] =
     &["databricks-gpt-5-5", "databricks-claude-opus-4-7"];
 
-/// Databricks endpoint-ID to display-name registry. Generated from manifest registry_labels section.
-/// Feeds the static registry tier of resolveModelLabel(). Final display label is determined
-/// by the three-tier precedence in resolveModelLabel() (discovered_name > registry_label > raw_id).
+/// Databricks endpoint-ID to display-name registry. Generated from manifest exact_records
+/// (provider = databricks_v2, registry_label present). Feeds the static registry tier of
+/// resolveModelLabel(). Final display label is determined by the three-tier precedence
+/// in resolveModelLabel() (discovered_name > registry_label > raw_id).
 pub const DATABRICKS_MODEL_NAMES: &[(&str, &str)] = &[
+    ("databricks-gpt-5-4-mini", "GPT-5.4 mini"),
+    ("databricks-gpt-5-4-nano", "GPT-5.4 nano"),
+    ("databricks-gpt-5-6-sol", "GPT-5.6 Sol"),
+    ("databricks-gpt-5-5", "GPT-5.5"),
+    ("databricks-claude-opus-4-7", "Claude Opus 4.7"),
+    ("databricks-gpt-5-6-luna", "GPT-5.6 Luna"),
+    ("databricks-gpt-5-6-terra", "GPT-5.6 Terra"),
     ("databricks-claude-haiku-4-5", "Claude Haiku 4.5 (latest)"),
     ("databricks-claude-opus-4-1", "Claude Opus 4.1 (latest)"),
     ("databricks-claude-opus-4-5", "Claude Opus 4.5 (latest)"),
     ("databricks-claude-opus-4-6", "Claude Opus 4.6"),
-    ("databricks-claude-opus-4-7", "Claude Opus 4.7"),
     ("databricks-claude-sonnet-4", "Claude Sonnet 4.5"),
     ("databricks-claude-sonnet-4-5", "Claude Sonnet 4.5 (latest)"),
     ("databricks-claude-sonnet-4-6", "Claude Sonnet 4.6"),
@@ -1391,12 +1930,6 @@ pub const DATABRICKS_MODEL_NAMES: &[(&str, &str)] = &[
     ("databricks-gpt-5-1", "GPT-5.1"),
     ("databricks-gpt-5-2", "GPT-5.2"),
     ("databricks-gpt-5-4", "GPT-5.4"),
-    ("databricks-gpt-5-4-mini", "GPT-5.4 mini"),
-    ("databricks-gpt-5-4-nano", "GPT-5.4 nano"),
-    ("databricks-gpt-5-5", "GPT-5.5"),
-    ("databricks-gpt-5-6-luna", "GPT-5.6 Luna"),
-    ("databricks-gpt-5-6-sol", "GPT-5.6 Sol"),
-    ("databricks-gpt-5-6-terra", "GPT-5.6 Terra"),
     ("databricks-gpt-5-mini", "GPT-5 Mini"),
     ("databricks-gpt-5-nano", "GPT-5 Nano"),
     ("databricks-gpt-oss-120b", "GPT OSS 120B"),
