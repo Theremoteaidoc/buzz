@@ -22,8 +22,10 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use buzz_core_pkg::kind::KIND_TEAM_CATALOG;
+use image::ImageDecoder;
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
+use std::io::Cursor;
 
 use super::{AgentDefinition, RespondTo, TeamRecord};
 
@@ -67,6 +69,14 @@ pub const MAX_NAME_POOL_ENTRIES: usize = 64;
 /// relay's 256 KiB ingest ceiling so base64/transport overhead upstream of the
 /// check cannot turn an accepted projection into a rejected event.
 pub const MAX_TOTAL_BYTES: usize = 192 * 1024;
+
+/// Maximum pixel dimension (width or height) accepted when decoding an inline
+/// avatar for downscaling. Prevents decompression-bomb attacks before any
+/// pixel allocation occurs. Mirrors `snapshot_avatar.rs`.
+const MAX_DOWNSCALE_DECODE_DIMENSION: u32 = 2048;
+/// Maximum heap allocation the image decoder may perform when materializing
+/// a raster for downscaling. Mirrors `snapshot_avatar.rs`.
+const MAX_DOWNSCALE_DECODE_ALLOC: u64 = 32 * 1024 * 1024;
 
 /// Maximum bytes for a member's opaque `member_key`. A conforming key is a
 /// 64-char SHA-256 hex digest; the bound is the parse-side ceiling for a
@@ -238,7 +248,19 @@ fn downscale_raster_avatar(url: &str) -> Option<String> {
         return None;
     }
     let bytes = crate::managed_agents::agent_snapshot::decode_avatar_data_url(url)?;
-    let img = image::load_from_memory(&bytes).ok()?;
+    // Use a bounded decoder to reject decompression bombs before pixel
+    // allocation. `image::load_from_memory` imposes no dimension ceiling and
+    // allows the decoder's default 512 MiB allocation budget.
+    let reader = image::ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DOWNSCALE_DECODE_DIMENSION);
+    limits.max_image_height = Some(MAX_DOWNSCALE_DECODE_DIMENSION);
+    limits.max_alloc = Some(MAX_DOWNSCALE_DECODE_ALLOC);
+    decoder.set_limits(limits).ok()?;
+    let img = image::DynamicImage::from_decoder(decoder).ok()?;
     for &max_dim in &[256u32, 192, 128, 96, 64] {
         let resized = if img.width().max(img.height()) > max_dim {
             img.resize(max_dim, max_dim, image::imageops::FilterType::Lanczos3)

@@ -47,8 +47,6 @@ fn team() -> TeamRecord {
     }
 }
 
-// ── Field discipline / anti-leak ─────────────────────────────────────────────
-
 #[test]
 fn test_projection_omits_local_only_team_fields() {
     let content = build_team_catalog_content(&team(), &[member("m1", "One")]).unwrap();
@@ -129,8 +127,6 @@ fn test_parallelism_is_clamped_into_the_supported_range() {
     }
 }
 
-// ── Member resolution ───────────────────────────────────────────────────────
-
 #[test]
 fn test_members_resolve_in_team_membership_order() {
     let personas = vec![member("m2", "Two"), member("m1", "One")];
@@ -151,8 +147,6 @@ fn test_unresolvable_member_fails_resolution_rather_than_being_skipped() {
 
     assert!(error.contains("team member m2 not found"));
 }
-
-// ── Determinism (the reconcile depends on it) ───────────────────────────────
 
 #[test]
 fn test_rebuilding_an_unchanged_team_reproduces_identical_bytes() {
@@ -190,8 +184,6 @@ fn test_editing_a_member_definition_changes_the_team_bytes() {
         team_catalog_content_json(&after)
     );
 }
-
-// ── Built-in reuse hint (exact-hash gated) ──────────────────────────────────
 
 /// Real built-in record (avatar cleared — live built-ins ship ~170 KiB inline PNG).
 fn builtin_record(id: &str) -> AgentDefinition {
@@ -266,8 +258,6 @@ fn test_reuse_hash_excludes_the_hint_fields_so_a_recipient_can_recompute_it() {
         Some(member_projection_hash(&hint_free).as_str())
     );
 }
-
-// ── Size contract ───────────────────────────────────────────────────────────
 
 #[test]
 fn test_member_count_at_the_limit_is_accepted_and_one_over_is_rejected() {
@@ -399,8 +389,6 @@ fn test_an_empty_team_projects_successfully() {
         .contains("\"members\":[]"));
 }
 
-// ── Event shape ─────────────────────────────────────────────────────────────
-
 #[test]
 fn test_event_uses_kind_30178_and_the_team_id_as_its_d_tag() {
     let event = build_team_catalog_event(&team(), &[member("m1", "One")], false)
@@ -450,8 +438,6 @@ fn test_oversized_team_fails_before_an_event_is_ever_built() {
 
     assert!(build_team_catalog_event(&team(), &members, true).is_err());
 }
-
-// ── Inbound parsing ─────────────────────────────────────────────────────────
 
 fn signed_event_with_content(content: &str) -> nostr::Event {
     EventBuilder::new(Kind::Custom(KIND_TEAM_CATALOG as u16), content)
@@ -616,8 +602,6 @@ fn test_a_body_repeating_a_member_key_is_rejected_on_read() {
     );
 }
 
-// ── v1 validation contract (parse boundary) ─────────────────────────────────
-
 /// A body carrying one member built from `fields`, as JSON.
 fn body_with_member(fields: &str) -> nostr::Event {
     signed_event_with_content(&format!(
@@ -719,8 +703,6 @@ fn test_an_oversize_member_key_is_rejected_on_read() {
     assert!(team_catalog_content_from_event(&event).is_err());
 }
 
-// ── Tombstone ───────────────────────────────────────────────────────────────
-
 #[test]
 fn test_catalog_delete_targets_the_30178_coordinate_with_no_e_tag() {
     const OWNER: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
@@ -747,9 +729,6 @@ fn test_catalog_delete_targets_the_30178_coordinate_with_no_e_tag() {
         .iter()
         .all(|tag| tag.as_slice().first().map(String::as_str) != Some("e")));
 }
-
-// ── Shared JSON fixture matrix (I8) ─────────────────────────────────────────
-// Raw 30178 bodies shared with teamCatalogRelay.test.mjs; divergence surfaces in CI.
 
 macro_rules! fixture {
     ($name:literal) => {
@@ -883,8 +862,6 @@ run_fixture_table!(
     ),
 );
 
-// ── Unique coverage from projection / transaction paths ───────────────────
-
 #[test]
 fn test_real_builtin_without_avatar_mutation_projects_successfully() {
     // A real built-in (fizz) has a ~170 KiB oversized avatar that is stripped in member_projection.
@@ -996,4 +973,27 @@ fn test_undecodable_oversized_data_url_falls_through_to_validation_error() {
     one.avatar_url = Some(url);
     let error = build_team_catalog_content(&team(), &[one]).unwrap_err();
     assert!(error.contains("avatar") || error.contains("too large"));
+}
+
+#[test]
+fn test_extreme_dimension_avatar_falls_through_to_validation_error() {
+    // 2100×2100 PNG exceeds the 2048px decode ceiling; bounded decoder rejects it before pixel allocation.
+    let img = image::RgbaImage::from_fn(2100, 2100, |x, y| {
+        image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255])
+    });
+    let mut raw = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut raw), image::ImageFormat::Png)
+        .unwrap();
+    let url = format!("data:image/png;base64,{}", STANDARD.encode(&raw));
+    assert!(
+        url.len() > MAX_AVATAR_URL_BYTES,
+        "fixture must be oversized"
+    );
+    let mut one = member("m1", "Bomb");
+    one.avatar_url = Some(url);
+    let error = build_team_catalog_content(&team(), &[one]).unwrap_err();
+    assert!(
+        error.contains("avatar") || error.contains("too large"),
+        "{error}"
+    );
 }
