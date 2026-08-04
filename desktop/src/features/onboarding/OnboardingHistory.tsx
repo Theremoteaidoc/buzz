@@ -9,8 +9,6 @@ import {
   type OnboardingRouteStep,
 } from "./onboardingRoute";
 
-const ONBOARDING_HISTORY_SESSION_ID = crypto.randomUUID();
-
 type HistoryAction = "initial" | "PUSH" | "REPLACE" | "BACK" | "FORWARD" | "GO";
 
 type OnboardingHistorySnapshot = {
@@ -25,25 +23,27 @@ type OnboardingHistoryContextValue = OnboardingHistorySnapshot & {
   backBy: (steps: number, fallback: OnboardingRouteStep) => void;
   exit: (path: string) => void;
   push: (step: OnboardingRouteStep) => void;
+  reset: (step: OnboardingRouteStep) => void;
   replace: (step: OnboardingRouteStep) => void;
 };
 
 const OnboardingHistoryContext =
   React.createContext<OnboardingHistoryContextValue | null>(null);
 
-function currentEntry(): OnboardingHistoryEntry | null {
+function currentEntry(sessionId: string): OnboardingHistoryEntry | null {
   return readOnboardingHistoryEntry(
     router.history.location.pathname,
     router.history.location.state,
-    ONBOARDING_HISTORY_SESSION_ID,
+    sessionId,
   );
 }
 
 function readSnapshot(
+  sessionId: string,
   action: HistoryAction,
   goIndex?: number,
 ): OnboardingHistorySnapshot {
-  const entry = currentEntry();
+  const entry = currentEntry(sessionId);
   const direction =
     action === "BACK" || (action === "GO" && (goIndex ?? 0) < 0)
       ? "backward"
@@ -61,13 +61,17 @@ export function OnboardingHistoryProvider({
 }: {
   children: React.ReactNode;
 }) {
-  const [snapshot, setSnapshot] = React.useState(() => readSnapshot("initial"));
+  const sessionIdRef = React.useRef(crypto.randomUUID());
+  const [snapshot, setSnapshot] = React.useState(() =>
+    readSnapshot(sessionIdRef.current, "initial"),
+  );
 
   React.useEffect(
     () =>
       router.history.subscribe(({ action }) => {
         setSnapshot(
           readSnapshot(
+            sessionIdRef.current,
             action.type,
             action.type === "GO" ? action.index : undefined,
           ),
@@ -77,24 +81,29 @@ export function OnboardingHistoryProvider({
   );
 
   const replace = React.useCallback((step: OnboardingRouteStep) => {
-    const entry = currentEntry();
+    const sessionId = sessionIdRef.current;
+    const entry = currentEntry(sessionId);
     router.history.replace(
       onboardingRoutePath(step),
-      createOnboardingHistoryState(
-        ONBOARDING_HISTORY_SESSION_ID,
-        entry?.depth ?? 0,
-      ),
+      createOnboardingHistoryState(sessionId, entry?.depth ?? 0),
     );
   }, []);
 
   const push = React.useCallback((step: OnboardingRouteStep) => {
-    const entry = currentEntry();
+    const sessionId = sessionIdRef.current;
+    const entry = currentEntry(sessionId);
     router.history.push(
       onboardingRoutePath(step),
-      createOnboardingHistoryState(
-        ONBOARDING_HISTORY_SESSION_ID,
-        (entry?.depth ?? 0) + 1,
-      ),
+      createOnboardingHistoryState(sessionId, (entry?.depth ?? 0) + 1),
+    );
+  }, []);
+
+  const reset = React.useCallback((step: OnboardingRouteStep) => {
+    const sessionId = crypto.randomUUID();
+    sessionIdRef.current = sessionId;
+    router.history.replace(
+      onboardingRoutePath(step),
+      createOnboardingHistoryState(sessionId, 0),
     );
   }, []);
 
@@ -115,6 +124,10 @@ export function OnboardingHistoryProvider({
   );
 
   const exit = React.useCallback((path: string) => {
+    // Retire every entry from the completed flow before replacing the current
+    // route. A later browser Back can still reach an old URL, but its marker no
+    // longer belongs to the active session and cannot reopen onboarding.
+    sessionIdRef.current = crypto.randomUUID();
     router.history.replace(path, {});
   }, []);
 
@@ -125,9 +138,10 @@ export function OnboardingHistoryProvider({
       backBy,
       exit,
       push,
+      reset,
       replace,
     }),
-    [back, backBy, exit, push, replace, snapshot],
+    [back, backBy, exit, push, reset, replace, snapshot],
   );
 
   return (

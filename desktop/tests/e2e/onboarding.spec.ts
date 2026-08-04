@@ -1330,7 +1330,7 @@ test("first-community explains when the local identity belongs to another accoun
   ).toBeVisible();
 });
 
-test("back clears Builderlab auth before returning to first-community choices", async ({
+test("back preserves Builderlab auth when returning to first-community choices", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -1359,8 +1359,17 @@ test("back clears Builderlab auth before returning to first-community choices", 
 
   await page.getByTestId("community-choice-create").click();
   await page.getByRole("button", { name: "Back" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Join or create a community" }),
+  ).toBeVisible();
   await page.getByTestId("community-choice-create").click();
-  await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
+  await expect(
+    page.getByRole("textbox", { name: "Community name" }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Continue" })).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => window.__BUZZ_E2E_COMMANDS__ ?? []))
+    .not.toContain("clear_builderlab_auth");
 });
 
 test("first-community shows the scenario cards for localhost", async ({

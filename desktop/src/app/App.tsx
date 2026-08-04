@@ -633,7 +633,7 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
       if (postOnboardingNavRef.current) {
         onboardingHistory.exit("/");
       } else if (!activeCommunity) {
-        onboardingHistory.push("community");
+        onboardingHistory.reset("community");
       } else if (onboardingHistory.step) {
         onboardingHistory.exit("/");
       }
