@@ -31,7 +31,7 @@ type PersonaCatalogDialogProps = {
   personas: AgentPersona[];
 };
 
-const agentInstructionMarkdownClassName = [
+export const agentInstructionMarkdownClassName = [
   "mt-3 w-full min-w-0 max-w-full overflow-x-hidden leading-6 text-muted-foreground [&>*]:min-w-0 [&>*]:max-w-full [&_.code-block-lines]:min-w-0 [&_.code-block-lines]:max-w-full [&_.code-block-lines]:whitespace-pre-wrap [&_.code-block-lines]:[overflow-wrap:anywhere] [&_.inline-code-chip]:max-w-full [&_.inline-code-chip]:whitespace-pre-wrap [&_.inline-code-chip]:[overflow-wrap:anywhere] [&_blockquote]:!text-muted-foreground [&_code]:!text-muted-foreground [&_li]:text-muted-foreground [&_ol]:text-muted-foreground [&_p]:text-muted-foreground [&_strong]:text-muted-foreground [&_td]:text-muted-foreground [&_ul]:text-muted-foreground",
   "[&>h1]:!text-sm [&>h1]:!font-semibold [&>h1]:!leading-6 [&>h1]:!tracking-normal [&>h1]:!text-foreground",
   "[&>h2]:!text-sm [&>h2]:!font-semibold [&>h2]:!leading-6 [&>h2]:!tracking-normal [&>h2]:!text-foreground",
@@ -334,6 +334,7 @@ function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
       <AgentDefinitionMetadata
         isBuiltIn={persona.isBuiltIn}
         model={persona.model}
+        provider={persona.provider}
         runtime={persona.runtime}
       />
 

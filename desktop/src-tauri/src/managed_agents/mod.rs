@@ -33,6 +33,7 @@ mod runtime_types;
 pub(crate) mod snapshot_avatar;
 pub(crate) mod spawn_snapshot;
 pub(crate) mod storage;
+pub(crate) mod team_catalog;
 pub(crate) mod team_events;
 mod team_repair;
 mod teams;
@@ -78,6 +79,9 @@ pub use runtime_types::*;
 pub use storage::*;
 pub use teams::*;
 pub use types::*;
+
+#[cfg(test)]
+pub(crate) use teams::delete_catalog_team_at;
 
 /// Returns the Buzz nest directory (`~/.buzz`) if it exists as a real
 /// directory (not a symlink), falling back to the user's home directory.
