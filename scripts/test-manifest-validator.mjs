@@ -601,9 +601,9 @@ test("schema-negative: exact_record inherited default_effort outside materialize
       // Override supported_efforts_override to a single value that excludes the family default.
       // For any exact record that inherits family default_effort, override efforts to exclude it.
       const rec = m.exact_records.find((r) => r.raw_model_id === "databricks-gpt-5-4-mini");
-      // Family default for the gpt5-4 rule is "none". Override to only ["low"] to force mismatch.
+      // Family default for the gpt5-4 rule is "medium". Override to only ["low"] to force mismatch.
       rec.supported_efforts_override = ["low"];
-      // No explicit default_effort — inherits "none" from family, but "none" is not in ["low"]
+      // No explicit default_effort — inherits "medium" from family, but "medium" is not in ["low"]
     }),
     "materialized default_effort",
   );
