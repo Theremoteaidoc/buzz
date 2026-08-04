@@ -6511,8 +6511,9 @@ mod tests {
         serde_json::to_value(&event).expect("serialise")
     }
 
+    /// Present outcome: correct event → pointer with the event's id and a Z-suffix timestamp.
     #[test]
-    fn test_canvas_pointer_from_query_response_happy_path() {
+    fn test_canvas_pointer_from_query_response_present() {
         let ev = make_canvas_event_value("# Team instructions\nBe helpful.");
         let id = ev["id"].as_str().unwrap().to_string();
         let result = canvas_pointer_from_query_response(&[ev], CHANNEL_UUID);
@@ -6521,10 +6522,9 @@ mod tests {
             other => panic!("expected Present, got {other:?}"),
         };
         assert_eq!(pointer.event_id, id, "pointer must carry the event id");
-        // Timestamp must use Z suffix, not +00:00
         assert!(
             pointer.timestamp.ends_with('Z'),
-            "timestamp must use Z suffix"
+            "timestamp must use Z suffix, not +00:00"
         );
         assert!(
             !pointer.timestamp.contains("+00:00"),
@@ -6532,400 +6532,276 @@ mod tests {
         );
     }
 
+    /// Absent outcome: empty array (no canvas event) or blank/empty content (cleared canvas).
     #[test]
-    fn test_canvas_pointer_from_query_response_empty_array_returns_absent() {
-        let result = canvas_pointer_from_query_response(&[], CHANNEL_UUID);
-        assert!(
-            matches!(result, CanvasFetchResult::Absent),
-            "empty array must be Absent (confirmed no canvas)"
-        );
+    fn test_canvas_pointer_from_query_response_absent_cases() {
+        let cases: &[(&str, &dyn Fn() -> Vec<serde_json::Value>)] = &[
+            ("empty array", &|| vec![]),
+            ("blank content", &|| vec![make_canvas_event_value("   ")]),
+            ("empty content", &|| vec![make_canvas_event_value("")]),
+        ];
+        for (name, make_input) in cases {
+            let result = canvas_pointer_from_query_response(&make_input(), CHANNEL_UUID);
+            assert!(
+                matches!(result, CanvasFetchResult::Absent),
+                "{name}: expected Absent, got {result:?}"
+            );
+        }
     }
 
+    /// Failed outcome: structurally invalid or security-failing events must be
+    /// Failed (not Absent) so stale cache entries are preserved rather than cleared.
     #[test]
-    fn test_canvas_pointer_from_query_response_blank_content_returns_absent() {
-        let ev = make_canvas_event_value("   ");
-        let result = canvas_pointer_from_query_response(&[ev], CHANNEL_UUID);
-        assert!(
-            matches!(result, CanvasFetchResult::Absent),
-            "blank content must be Absent (cleared canvas)"
-        );
-    }
-
-    #[test]
-    fn test_canvas_pointer_from_query_response_empty_content_returns_absent() {
-        let ev = make_canvas_event_value("");
-        let result = canvas_pointer_from_query_response(&[ev], CHANNEL_UUID);
-        assert!(
-            matches!(result, CanvasFetchResult::Absent),
-            "empty content must be Absent (cleared canvas)"
-        );
-    }
-
-    /// A bare JSON object with a plausible-looking id but missing pubkey/sig/kind/tags
-    /// must be rejected as Failed — it is a structural parse error, not confirmed absence.
-    #[test]
-    fn test_canvas_pointer_from_query_response_partial_object_returns_failed() {
+    fn test_canvas_pointer_from_query_response_failed_cases() {
+        // Partial object (missing pubkey/sig/kind/tags)
         let partial = serde_json::json!({
             "id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
             "created_at": 1705312200_i64,
             "content": "some instructions"
         });
-        let result = canvas_pointer_from_query_response(&[partial], CHANNEL_UUID);
-        assert!(
-            matches!(result, CanvasFetchResult::Failed),
-            "partial event object (missing pubkey/sig/kind/tags) must be Failed — not Absent"
-        );
-    }
 
-    /// A JSON object that looks like an event but has `created_at` as a string
-    /// must be rejected as Failed — the nostr::Event parser enforces integer type.
-    #[test]
-    fn test_canvas_pointer_from_query_response_string_timestamp_returns_failed() {
-        let keys = Keys::generate();
-        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
-        let mut ev = serde_json::to_value(
-            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
-                .tags([h_tag])
-                .sign_with_keys(&keys)
-                .expect("sign"),
-        )
-        .expect("serialise");
-        // Corrupt created_at to a string value.
-        ev["created_at"] = serde_json::Value::String("2026-03-15T16:30:00+00:00".into());
-        let result = canvas_pointer_from_query_response(&[ev], CHANNEL_UUID);
-        assert!(
-            matches!(result, CanvasFetchResult::Failed),
-            "string created_at must be Failed — nostr::Event deserialiser rejects it"
-        );
-    }
-
-    /// A JSON object that looks like an event but is missing `created_at`
-    /// must be rejected as Failed — nostr::Event requires the field.
-    #[test]
-    fn test_canvas_pointer_from_query_response_missing_timestamp_returns_failed() {
-        let keys = Keys::generate();
-        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
-        let mut ev = serde_json::to_value(
-            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
-                .tags([h_tag])
-                .sign_with_keys(&keys)
-                .expect("sign"),
-        )
-        .expect("serialise");
-        ev.as_object_mut().unwrap().remove("created_at");
-        let result = canvas_pointer_from_query_response(&[ev], CHANNEL_UUID);
-        assert!(
-            matches!(result, CanvasFetchResult::Failed),
-            "missing created_at must be Failed — nostr::Event deserialiser rejects it"
-        );
-    }
-
-    /// An event with a timestamp at Timestamp::max() (u64::MAX) must return Failed.
-    ///
-    /// `u64::MAX as i64` wraps to -1, which chrono silently accepts as
-    /// 1969-12-31T23:59:59Z. The checked i64::try_from must reject it first.
-    #[test]
-    fn test_canvas_pointer_from_query_response_timestamp_max_returns_failed() {
-        let keys = Keys::generate();
-        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
-        let ev = serde_json::to_value(
-            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
-                .tags([h_tag])
-                .custom_created_at(Timestamp::max())
-                .sign_with_keys(&keys)
-                .expect("sign"),
-        )
-        .expect("serialise");
-        let result = canvas_pointer_from_query_response(&[ev], CHANNEL_UUID);
-        assert!(
-            matches!(result, CanvasFetchResult::Failed),
-            "Timestamp::max() (u64::MAX) must be Failed — not wrap to 1969"
-        );
-    }
-
-    /// A structurally complete but tampered event (content altered after signing)
-    /// must be Failed (signature verification error, not confirmed absence).
-    #[test]
-    fn test_canvas_pointer_from_query_response_tampered_event_returns_failed() {
-        let keys = Keys::generate();
-        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
-        let mut ev = serde_json::to_value(
-            EventBuilder::new(
-                Kind::Custom(buzz_core::kind::KIND_CANVAS as u16),
-                "original",
+        // String created_at (nostr::Event deserialiser rejects non-integer)
+        let string_ts = {
+            let keys = Keys::generate();
+            let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
+            let mut ev = serde_json::to_value(
+                EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                    .tags([h_tag])
+                    .sign_with_keys(&keys)
+                    .expect("sign"),
             )
-            .tags([h_tag])
-            .sign_with_keys(&keys)
-            .expect("sign"),
-        )
-        .expect("serialise");
-        // Tamper the content after signing — id and sig no longer agree.
-        ev["content"] = serde_json::Value::String("injected instructions".into());
-        let result = canvas_pointer_from_query_response(&[ev], CHANNEL_UUID);
-        assert!(
-            matches!(result, CanvasFetchResult::Failed),
-            "tampered event must fail verify() and be Failed — not Absent"
-        );
-    }
+            .expect("serialise");
+            ev["created_at"] = serde_json::Value::String("2026-03-15T16:30:00+00:00".into());
+            ev
+        };
 
-    /// An event with the wrong kind (not 40100) must be Failed.
-    #[test]
-    fn test_canvas_pointer_from_query_response_wrong_kind_returns_failed() {
-        let keys = Keys::generate();
-        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
-        let ev = serde_json::to_value(
-            EventBuilder::new(Kind::Custom(9), "content")
+        // Missing created_at field
+        let missing_ts = {
+            let keys = Keys::generate();
+            let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
+            let mut ev = serde_json::to_value(
+                EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                    .tags([h_tag])
+                    .sign_with_keys(&keys)
+                    .expect("sign"),
+            )
+            .expect("serialise");
+            ev.as_object_mut().unwrap().remove("created_at");
+            ev
+        };
+
+        // Timestamp::max() — u64::MAX wraps to -1 via i64 cast; checked conversion must reject it
+        let ts_max = {
+            let keys = Keys::generate();
+            let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
+            serde_json::to_value(
+                EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                    .tags([h_tag])
+                    .custom_created_at(Timestamp::max())
+                    .sign_with_keys(&keys)
+                    .expect("sign"),
+            )
+            .expect("serialise")
+        };
+
+        // Tampered event (content altered after signing — id/sig no longer agree)
+        let tampered = {
+            let keys = Keys::generate();
+            let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
+            let mut ev = serde_json::to_value(
+                EventBuilder::new(
+                    Kind::Custom(buzz_core::kind::KIND_CANVAS as u16),
+                    "original",
+                )
                 .tags([h_tag])
                 .sign_with_keys(&keys)
                 .expect("sign"),
-        )
-        .expect("serialise");
-        let result = canvas_pointer_from_query_response(&[ev], CHANNEL_UUID);
-        assert!(
-            matches!(result, CanvasFetchResult::Failed),
-            "wrong kind must be Failed — not Absent"
-        );
-    }
-
-    /// An event missing the expected h-tag (or carrying a different channel UUID)
-    /// must be Failed.
-    #[test]
-    fn test_canvas_pointer_from_query_response_wrong_h_tag_returns_failed() {
-        let keys = Keys::generate();
-        let wrong_h = Tag::parse(["h", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]).expect("h tag");
-        let ev = serde_json::to_value(
-            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
-                .tags([wrong_h])
-                .sign_with_keys(&keys)
-                .expect("sign"),
-        )
-        .expect("serialise");
-        let result = canvas_pointer_from_query_response(&[ev], CHANNEL_UUID);
-        assert!(
-            matches!(result, CanvasFetchResult::Failed),
-            "mismatched h-tag must be Failed — not Absent"
-        );
-    }
-
-    #[test]
-    fn test_canvas_pointer_from_query_response_timestamp_uses_z_suffix() {
-        let ev = make_canvas_event_value("instructions");
-        let result = canvas_pointer_from_query_response(&[ev], CHANNEL_UUID);
-        let pointer = match result {
-            CanvasFetchResult::Present(p) => p,
-            other => panic!("expected Present, got {other:?}"),
+            )
+            .expect("serialise");
+            ev["content"] = serde_json::Value::String("injected instructions".into());
+            ev
         };
-        assert!(
-            pointer.timestamp.ends_with('Z'),
-            "RFC3339 timestamp must use Z suffix, not +00:00"
-        );
-        assert!(
-            !pointer.timestamp.contains("+00:00"),
-            "timestamp must not use +00:00 offset"
-        );
+
+        // Wrong kind (not 40100)
+        let wrong_kind = {
+            let keys = Keys::generate();
+            let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
+            serde_json::to_value(
+                EventBuilder::new(Kind::Custom(9), "content")
+                    .tags([h_tag])
+                    .sign_with_keys(&keys)
+                    .expect("sign"),
+            )
+            .expect("serialise")
+        };
+
+        // Wrong h-tag (different channel UUID)
+        let wrong_h = {
+            let keys = Keys::generate();
+            let h_tag = Tag::parse(["h", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]).expect("h tag");
+            serde_json::to_value(
+                EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                    .tags([h_tag])
+                    .sign_with_keys(&keys)
+                    .expect("sign"),
+            )
+            .expect("serialise")
+        };
+
+        let cases: &[(&str, serde_json::Value)] = &[
+            ("partial object (missing pubkey/sig/kind/tags)", partial),
+            ("string created_at", string_ts),
+            ("missing created_at", missing_ts),
+            ("Timestamp::max() (u64::MAX)", ts_max),
+            ("tampered event (sig mismatch)", tampered),
+            ("wrong kind", wrong_kind),
+            ("wrong h-tag", wrong_h),
+        ];
+        for (name, ev) in cases {
+            let result = canvas_pointer_from_query_response(std::slice::from_ref(ev), CHANNEL_UUID);
+            assert!(
+                matches!(result, CanvasFetchResult::Failed),
+                "{name}: expected Failed (not Absent — stale cache must be preserved), got {result:?}"
+            );
+        }
     }
 
     // ── CanvasRevisionCache tri-state (A1) ────────────────────────────────────
 
+    /// Exercises all six tri-state transitions of `CanvasRevisionCache` in sequence:
+    /// Present → stale-on-Failed → Absent clears → no-stale-after-Absent → new Present → update.
     #[test]
-    fn test_canvas_revision_cache_present_updates_and_returns_pointer() {
+    fn test_canvas_revision_cache_tri_state_transitions() {
         let cache = CanvasRevisionCache::new();
         let ch = Uuid::new_v4();
-        let pointer = crate::queue::CanvasPointer {
-            event_id: "abc123".to_string(),
-            timestamp: "2024-01-15T10:30:00Z".to_string(),
-        };
-        let result = cache.resolve_for_turn(&ch, CanvasFetchResult::Present(pointer.clone()));
-        assert_eq!(result, Some(pointer.clone()));
-        // Cache is updated: a Failed fetch returns the cached pointer as stale.
-        let stale = cache.resolve_for_turn(&ch, CanvasFetchResult::Failed);
-        assert_eq!(stale, Some(pointer));
-    }
 
-    #[test]
-    fn test_canvas_revision_cache_absent_clears_entry() {
-        let cache = CanvasRevisionCache::new();
-        let ch = Uuid::new_v4();
-        // Seed with a present pointer.
-        let pointer = crate::queue::CanvasPointer {
-            event_id: "abc123".to_string(),
-            timestamp: "2024-01-15T10:30:00Z".to_string(),
-        };
-        cache.resolve_for_turn(&ch, CanvasFetchResult::Present(pointer));
-        // Now canvas is cleared.
-        let result = cache.resolve_for_turn(&ch, CanvasFetchResult::Absent);
-        assert!(result.is_none(), "Absent must return None");
-        // Cache is cleared: a Failed fetch after Absent returns None (nothing cached).
-        let stale = cache.resolve_for_turn(&ch, CanvasFetchResult::Failed);
-        assert!(stale.is_none(), "Absent must clear the cache entry");
-    }
-
-    #[test]
-    fn test_canvas_revision_cache_failed_serves_stale() {
-        let cache = CanvasRevisionCache::new();
-        let ch = Uuid::new_v4();
-        // Seed with a present pointer.
-        let pointer = crate::queue::CanvasPointer {
-            event_id: "stale123".to_string(),
-            timestamp: "2024-01-15T10:30:00Z".to_string(),
-        };
-        cache.resolve_for_turn(&ch, CanvasFetchResult::Present(pointer.clone()));
-        // Fetch fails.
-        let result = cache.resolve_for_turn(&ch, CanvasFetchResult::Failed);
-        assert_eq!(result, Some(pointer), "Failed must serve stale value");
-    }
-
-    #[test]
-    fn test_canvas_revision_cache_failed_first_returns_none() {
-        let cache = CanvasRevisionCache::new();
-        let ch = Uuid::new_v4();
-        // No prior entry; first-fetch failure must emit nothing.
-        let result = cache.resolve_for_turn(&ch, CanvasFetchResult::Failed);
-        assert!(
-            result.is_none(),
-            "Failed with no prior entry must return None"
-        );
-    }
-
-    #[test]
-    fn test_canvas_revision_cache_present_to_absent_transition() {
-        // present → absent: confirmed deletion clears the pointer.
-        let cache = CanvasRevisionCache::new();
-        let ch = Uuid::new_v4();
-        let pointer = crate::queue::CanvasPointer {
-            event_id: "rev1".to_string(),
-            timestamp: "2024-01-15T10:30:00Z".to_string(),
-        };
-        cache.resolve_for_turn(&ch, CanvasFetchResult::Present(pointer));
-        let result = cache.resolve_for_turn(&ch, CanvasFetchResult::Absent);
-        assert!(result.is_none(), "canvas deletion must clear the pointer");
-    }
-
-    #[test]
-    fn test_canvas_revision_cache_present_to_new_revision() {
-        // present → new revision: pointer updated.
-        let cache = CanvasRevisionCache::new();
-        let ch = Uuid::new_v4();
-        let old = crate::queue::CanvasPointer {
+        let p1 = crate::queue::CanvasPointer {
             event_id: "rev1".to_string(),
             timestamp: "2024-01-15T10:00:00Z".to_string(),
         };
-        let new_p = crate::queue::CanvasPointer {
+        let p2 = crate::queue::CanvasPointer {
             event_id: "rev2".to_string(),
             timestamp: "2024-01-16T10:00:00Z".to_string(),
         };
-        cache.resolve_for_turn(&ch, CanvasFetchResult::Present(old));
-        let result = cache.resolve_for_turn(&ch, CanvasFetchResult::Present(new_p.clone()));
-        assert_eq!(result, Some(new_p), "new revision must replace old pointer");
+
+        // 1. Failed with no prior entry → None (nothing to serve stale)
+        assert!(
+            cache
+                .resolve_for_turn(&ch, CanvasFetchResult::Failed)
+                .is_none(),
+            "Failed on empty cache must return None"
+        );
+
+        // 2. Present → updates cache and returns pointer
+        assert_eq!(
+            cache.resolve_for_turn(&ch, CanvasFetchResult::Present(p1.clone())),
+            Some(p1.clone()),
+            "Present must return the new pointer"
+        );
+
+        // 3. Failed after Present → stale pointer served; cache entry preserved
+        assert_eq!(
+            cache.resolve_for_turn(&ch, CanvasFetchResult::Failed),
+            Some(p1.clone()),
+            "Failed after Present must serve stale value"
+        );
+
+        // 4. Absent after Present → confirmed deletion; cache cleared; returns None
+        assert!(
+            cache
+                .resolve_for_turn(&ch, CanvasFetchResult::Absent)
+                .is_none(),
+            "Absent must return None and clear cache"
+        );
+
+        // 5. Failed after Absent → no stale entry; returns None
+        assert!(
+            cache
+                .resolve_for_turn(&ch, CanvasFetchResult::Failed)
+                .is_none(),
+            "Failed after Absent must return None (no cached entry)"
+        );
+
+        // 6. New Present after Absent → pointer updated
+        assert_eq!(
+            cache.resolve_for_turn(&ch, CanvasFetchResult::Present(p2.clone())),
+            Some(p2),
+            "new revision after Absent must return the new pointer"
+        );
     }
 
     // ── CanvasRevisionCache stale-preservation: Failed from parser preserves cache (A1) ─
 
-    /// Malformed event (parse error) → Failed → cache unchanged; stale pointer served.
+    /// Proves that a `Failed` parse result (malformed event, tampered sig, or wrong h-tag)
+    /// leaves the cache entry intact so the stale pointer is served rather than cleared.
     #[test]
-    fn test_cache_stale_preserved_on_malformed_event() {
-        let cache = CanvasRevisionCache::new();
-        let ch = Uuid::from_u128(0x1234);
-        let prior = crate::queue::CanvasPointer {
-            event_id: "stale-rev".to_string(),
-            timestamp: "2024-01-15T10:30:00Z".to_string(),
+    #[allow(clippy::type_complexity)]
+    fn test_cache_stale_preserved_on_parser_failure() {
+        // Build a parse-Failed input for each failure mode.
+        let make_malformed = |_ch_str: &str| -> serde_json::Value {
+            serde_json::json!({
+                "id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+                "created_at": 1705312200_i64,
+                "content": "some instructions"
+            })
         };
-        cache.resolve_for_turn(&ch, CanvasFetchResult::Present(prior.clone()));
-
-        // A partial event (missing pubkey/sig) → Failed from parser.
-        let partial = serde_json::json!({
-            "id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-            "created_at": 1705312200_i64,
-            "content": "some instructions"
-        });
-        let ch_str = ch.to_string();
-        let parse_result = canvas_pointer_from_query_response(&[partial], &ch_str);
-        assert!(
-            matches!(parse_result, CanvasFetchResult::Failed),
-            "malformed event must be Failed"
-        );
-        let served = cache.resolve_for_turn(&ch, parse_result);
-        assert_eq!(
-            served,
-            Some(prior),
-            "Failed result must serve stale pointer, not clear it"
-        );
-    }
-
-    /// Tampered event (sig failure) → Failed → cache unchanged; stale pointer served.
-    #[test]
-    fn test_cache_stale_preserved_on_tampered_event() {
-        use nostr::{EventBuilder, Keys, Kind, Tag};
-        let cache = CanvasRevisionCache::new();
-        let ch = Uuid::from_u128(0x5678);
-        let prior = crate::queue::CanvasPointer {
-            event_id: "stale-rev2".to_string(),
-            timestamp: "2024-01-15T10:30:00Z".to_string(),
-        };
-        cache.resolve_for_turn(&ch, CanvasFetchResult::Present(prior.clone()));
-
-        let keys = Keys::generate();
-        let h_tag = Tag::parse(["h", &ch.to_string()]).expect("h tag");
-        let mut ev = serde_json::to_value(
-            EventBuilder::new(
-                Kind::Custom(buzz_core::kind::KIND_CANVAS as u16),
-                "original",
-            )
-            .tags([h_tag])
-            .sign_with_keys(&keys)
-            .expect("sign"),
-        )
-        .expect("serialise");
-        ev["content"] = serde_json::Value::String("injected".into());
-
-        let ch_str = ch.to_string();
-        let parse_result = canvas_pointer_from_query_response(&[ev], &ch_str);
-        assert!(
-            matches!(parse_result, CanvasFetchResult::Failed),
-            "tampered event must be Failed"
-        );
-        let served = cache.resolve_for_turn(&ch, parse_result);
-        assert_eq!(
-            served,
-            Some(prior),
-            "Failed (tampered) must serve stale pointer, not clear it"
-        );
-    }
-
-    /// Wrong h-tag → Failed → cache unchanged; stale pointer served.
-    #[test]
-    fn test_cache_stale_preserved_on_wrong_channel_tag() {
-        use nostr::{EventBuilder, Keys, Kind, Tag};
-        let cache = CanvasRevisionCache::new();
-        let ch = Uuid::from_u128(0x9abc);
-        let prior = crate::queue::CanvasPointer {
-            event_id: "stale-rev3".to_string(),
-            timestamp: "2024-01-15T10:30:00Z".to_string(),
-        };
-        cache.resolve_for_turn(&ch, CanvasFetchResult::Present(prior.clone()));
-
-        let keys = Keys::generate();
-        let wrong_h = Tag::parse(["h", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]).expect("h tag");
-        let ev = serde_json::to_value(
-            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
-                .tags([wrong_h])
+        let make_tampered = |ch_str: &str| -> serde_json::Value {
+            let keys = Keys::generate();
+            let h_tag = Tag::parse(["h", ch_str]).expect("h tag");
+            let mut ev = serde_json::to_value(
+                EventBuilder::new(
+                    Kind::Custom(buzz_core::kind::KIND_CANVAS as u16),
+                    "original",
+                )
+                .tags([h_tag])
                 .sign_with_keys(&keys)
                 .expect("sign"),
-        )
-        .expect("serialise");
+            )
+            .expect("serialise");
+            ev["content"] = serde_json::Value::String("injected".into());
+            ev
+        };
+        let make_wrong_h = |_ch_str: &str| -> serde_json::Value {
+            let keys = Keys::generate();
+            let wrong_h = Tag::parse(["h", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]).expect("h tag");
+            serde_json::to_value(
+                EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                    .tags([wrong_h])
+                    .sign_with_keys(&keys)
+                    .expect("sign"),
+            )
+            .expect("serialise")
+        };
 
-        let ch_str = ch.to_string();
-        let parse_result = canvas_pointer_from_query_response(&[ev], &ch_str);
-        assert!(
-            matches!(parse_result, CanvasFetchResult::Failed),
-            "wrong h-tag must be Failed"
-        );
-        let served = cache.resolve_for_turn(&ch, parse_result);
-        assert_eq!(
-            served,
-            Some(prior),
-            "Failed (wrong h-tag) must serve stale pointer, not clear it"
-        );
+        let cases: &[(&str, &dyn Fn(&str) -> serde_json::Value)] = &[
+            ("malformed event (partial object)", &make_malformed),
+            ("tampered event (sig mismatch)", &make_tampered),
+            ("wrong h-tag", &make_wrong_h),
+        ];
+
+        for (name, make_ev) in cases {
+            let cache = CanvasRevisionCache::new();
+            let ch = Uuid::new_v4();
+            let prior = crate::queue::CanvasPointer {
+                event_id: format!("stale-{name}"),
+                timestamp: "2024-01-15T10:30:00Z".to_string(),
+            };
+            cache.resolve_for_turn(&ch, CanvasFetchResult::Present(prior.clone()));
+
+            let ch_str = ch.to_string();
+            let ev = make_ev(&ch_str);
+            let parse_result = canvas_pointer_from_query_response(&[ev], &ch_str);
+            assert!(
+                matches!(parse_result, CanvasFetchResult::Failed),
+                "{name}: input must produce Failed from parser"
+            );
+            let served = cache.resolve_for_turn(&ch, parse_result);
+            assert_eq!(
+                served,
+                Some(prior),
+                "{name}: Failed must serve stale pointer, not clear the cache"
+            );
+        }
     }
 
     // ── ChannelInfoResolver TTL (A3) ──────────────────────────────────────────
@@ -7493,26 +7369,13 @@ mod tests {
 
     // ── Unresolved-metadata: fetch_conversation_context DM selection (A1/A2) ──
 
-    /// `fetch_conversation_context` with `is_dm_turn = true` must take the DM
-    /// history path and return `ConversationContext::Dm`; with `is_dm_turn = false`
-    /// it must skip the DM fetch entirely (no HTTP request).
-    ///
-    /// This is the missing tripwire for the pass-2 fix: proves the authoritative
-    /// `is_dm_turn` boolean governs `fetch_conversation_context` so that a
-    /// regression silently reverting to `unwrap_or(false)` breaks this test.
+    /// Proves that `is_dm_turn = false` causes `fetch_conversation_context` to skip
+    /// the DM history fetch entirely — the `true`-arm (DM fetch issued) is covered
+    /// end-to-end by `test_run_prompt_task_dm_classification_forwarding_is_end_to_end_authoritative`.
     #[tokio::test]
     async fn test_fetch_conversation_context_dm_classification_is_authoritative() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        // Build a minimal DM events response that parse_nostr_dm_response accepts:
-        // one event with content + created_at. pubkey is optional in the parser.
-        let dm_event = serde_json::json!([{
-            "content": "hello from dm",
-            "created_at": 1_700_000_000u64,
-            "pubkey": "aabbcc"
-        }]);
-        let body = dm_event.to_string();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -7526,12 +7389,11 @@ mod tests {
                 let mut buf = vec![0u8; 8192];
                 let _ = socket.read(&mut buf).await;
                 server_requests.fetch_add(1, Ordering::SeqCst);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]",
+                    )
+                    .await;
             }
         });
 
@@ -7543,8 +7405,6 @@ mod tests {
             auth_tag_json: None,
         };
 
-        // A batch with no thread tags — ensures parse_thread_tags returns no
-        // root_event_id, so fetch_conversation_context reaches the is_dm_turn branch.
         let make_batch = |channel_id: Uuid| {
             let keys = nostr::Keys::generate();
             let event = nostr::EventBuilder::new(nostr::Kind::Custom(1), "msg")
@@ -7570,28 +7430,14 @@ mod tests {
             ..make_prompt_context_no_owner()
         };
 
-        // ── Case 1: is_dm_turn = true → must take the DM history path ────────
-        let channel_id = Uuid::from_u128(0x1001);
-        let result = fetch_conversation_context(&make_batch(channel_id), &ctx, true).await;
-
-        assert!(
-            matches!(result, Some(ConversationContext::Dm { .. })),
-            "is_dm_turn=true must return ConversationContext::Dm; got: {result:?}"
-        );
-        let dm_requests = requests.load(Ordering::SeqCst);
-        assert!(
-            dm_requests >= 1,
-            "is_dm_turn=true must issue at least one HTTP request to fetch DM history"
-        );
-
-        // ── Case 2: is_dm_turn = false → must skip DM fetch entirely ─────────
+        // is_dm_turn = false on a non-thread batch → must return None and issue zero requests.
         let requests_before = requests.load(Ordering::SeqCst);
-        let channel_id2 = Uuid::from_u128(0x1002);
-        let result = fetch_conversation_context(&make_batch(channel_id2), &ctx, false).await;
+        let result =
+            fetch_conversation_context(&make_batch(Uuid::from_u128(0x1002)), &ctx, false).await;
 
         assert!(
             result.is_none(),
-            "is_dm_turn=false on a non-thread turn must return None (no DM fetch); got: {result:?}"
+            "is_dm_turn=false on a non-thread turn must return None; got: {result:?}"
         );
         assert_eq!(
             requests.load(Ordering::SeqCst),
