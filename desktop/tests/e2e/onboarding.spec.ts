@@ -898,6 +898,64 @@ test("first-community choices route join, create, owner, and member intents", as
   await expect(page.getByTestId("invite-redeem-submit")).toBeEnabled();
 });
 
+test("hosted onboarding collapses transient history and goes back without pushing", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: { pubkey_hex: BLANK_TYLER_IDENTITY.pubkey },
+      builderlabCommunities: [
+        {
+          id: "owned-community",
+          name: "North Star",
+          normalized_host: "north-star.communities.buzz.xyz",
+        },
+      ],
+    },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+  await expect(page).toHaveURL(/#\/onboarding\/community$/);
+
+  await page.getByTestId("community-choice-create").click();
+  await expect(page.getByText("North Star")).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/community-owned$/);
+
+  await page.goBack();
+  await expect(
+    page.getByRole("heading", { name: "Join or create a community" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/community$/);
+
+  await page.goForward();
+  await expect(page.getByText("North Star")).toBeVisible();
+  const historyLength = await page.evaluate(() => window.history.length);
+  await page.getByRole("button", { name: "Back" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Join or create a community" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/community$/);
+  await expect
+    .poll(() => page.evaluate(() => window.history.length))
+    .toBe(historyLength);
+});
+
 test("first-community owner can connect an existing hosted community", async ({
   page,
 }) => {
