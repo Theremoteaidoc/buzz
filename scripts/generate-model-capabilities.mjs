@@ -367,7 +367,7 @@ for (const [provider, fb] of Object.entries(manifest.provider_fallbacks)) {
   }
 }
 
-// Validate exact_records — check for duplicate (provider, raw_model_id) keys
+// Validate exact_records — full invariant checks on every override axis
 const seenExactKeys = new Set();
 for (const rec of manifest.exact_records ?? []) {
   if (!rec.provider || !rec.raw_model_id)
@@ -375,6 +375,60 @@ for (const rec of manifest.exact_records ?? []) {
   const key = `${rec.provider}::${rec.raw_model_id}`;
   if (seenExactKeys.has(key)) throw new Error(`duplicate exact_record key: ${key}`);
   seenExactKeys.add(key);
+
+  // Validate match_priority: must be a non-negative integer if present (injected into comments).
+  if (rec.match_priority !== undefined) {
+    if (!Number.isInteger(rec.match_priority) || rec.match_priority < 0)
+      throw new Error(`exact_record ${key}: match_priority must be a non-negative integer`);
+  }
+
+  // Validate supported_efforts_override if present.
+  if (rec.supported_efforts_override !== undefined) {
+    assertNonEmpty(rec.supported_efforts_override, `exact_record ${key} supported_efforts_override`);
+    const seenEfforts = new Set();
+    for (const e of rec.supported_efforts_override) {
+      assertEnum(e, VALID_EFFORTS, `exact_record ${key} supported_efforts_override[]`);
+      if (seenEfforts.has(e))
+        throw new Error(`exact_record ${key}: duplicate effort "${e}" in supported_efforts_override`);
+      seenEfforts.add(e);
+    }
+    // Validate ordering matches canonical effort order (Rust clamp assumes sorted).
+    const canonicalIndices = rec.supported_efforts_override.map((e) => VALID_EFFORTS.indexOf(e));
+    for (let i = 1; i < canonicalIndices.length; i++) {
+      if (canonicalIndices[i] <= canonicalIndices[i - 1]) {
+        throw new Error(
+          `exact_record ${key}: supported_efforts_override must follow canonical order [${VALID_EFFORTS.join(", ")}]; got [${rec.supported_efforts_override.join(", ")}]`,
+        );
+      }
+    }
+    // Validate default_effort is in the override if present.
+    if (rec.default_effort !== undefined && rec.default_effort !== null) {
+      assertEnum(rec.default_effort, VALID_EFFORTS, `exact_record ${key} default_effort`);
+      if (!rec.supported_efforts_override.includes(rec.default_effort)) {
+        throw new Error(
+          `exact_record ${key}: default_effort "${rec.default_effort}" not in supported_efforts_override [${rec.supported_efforts_override.join(", ")}]`,
+        );
+      }
+    }
+  } else if (rec.default_effort !== undefined && rec.default_effort !== null) {
+    // default_effort override without supported_efforts_override — still validate enum.
+    assertEnum(rec.default_effort, VALID_EFFORTS, `exact_record ${key} default_effort`);
+  }
+
+  // Validate thinking_mode override if present.
+  if (rec.thinking_mode !== undefined) {
+    assertEnum(rec.thinking_mode, VALID_THINKING_MODES, `exact_record ${key} thinking_mode`);
+  }
+
+  // Validate databricks_v2_wire_route override if present.
+  if (rec.databricks_v2_wire_route !== undefined) {
+    assertEnum(rec.databricks_v2_wire_route, VALID_DBV2_ROUTES, `exact_record ${key} databricks_v2_wire_route`);
+  }
+
+  // Validate normalization_policy override if present.
+  if (rec.normalization_policy !== undefined) {
+    assertEnum(rec.normalization_policy, VALID_NORM_POLICIES, `exact_record ${key} normalization_policy`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -399,16 +453,32 @@ function stripCatalogPrefix(model) {
 }
 
 /**
+ * Returns true if the character at position idx-1 in str is a valid left boundary:
+ * start-of-string, "-", or ".". Prevents substring matches like "customgpt" matching "gpt".
+ */
+function hasLeftBoundary(str, idx) {
+  if (idx === 0) return true;
+  const prev = str[idx - 1];
+  return prev === "-" || prev === ".";
+}
+
+/**
  * gpt5-token match: model contains token at a word boundary (end-of-string or "-").
  * Does NOT match if followed by a digit or letter.
+ * Left-boundary checked: token must start at beginning of string or after "-" or ".".
  */
 function gpt5TokenMatches(model, token) {
   const lower = model.toLowerCase();
+  const tok = token.toLowerCase();
   let start = 0;
   while (true) {
-    const idx = lower.indexOf(token.toLowerCase(), start);
+    const idx = lower.indexOf(tok, start);
     if (idx === -1) return false;
-    const afterIdx = idx + token.length;
+    const afterIdx = idx + tok.length;
+    if (!hasLeftBoundary(lower, idx)) {
+      start = afterIdx;
+      continue;
+    }
     const afterChar = afterIdx < lower.length ? lower[afterIdx] : "";
     if (afterChar === "" || afterChar === "-") return true;
     start = afterIdx;
@@ -417,14 +487,20 @@ function gpt5TokenMatches(model, token) {
 
 /**
  * gpt5-base match: like gpt5-token but also rejects short -<1-3 digit> suffixes.
+ * Left-boundary checked: token must start at beginning of string or after "-" or ".".
  */
 function gpt5BaseMatches(model, token) {
   const lower = model.toLowerCase();
+  const tok = token.toLowerCase();
   let start = 0;
   while (true) {
-    const idx = lower.indexOf(token.toLowerCase(), start);
+    const idx = lower.indexOf(tok, start);
     if (idx === -1) return false;
-    const afterIdx = idx + token.length;
+    const afterIdx = idx + tok.length;
+    if (!hasLeftBoundary(lower, idx)) {
+      start = afterIdx;
+      continue;
+    }
     const suffix = lower.slice(afterIdx);
     if (suffix === "") return true;
     if (!suffix.startsWith("-")) {
@@ -776,11 +852,14 @@ pub struct CapabilityResult {
 
 /// Returns the exact capability record for a provider-qualified raw model ID,
 /// if one exists in the manifest. This is checked BEFORE any prefix stripping.
+/// Matching is case-insensitive — both inputs are lowercased before comparison.
 pub fn lookup_exact(provider: &str, raw_model_id: &str) -> Option<CapabilityResult> {
-    match (provider, raw_model_id) {
+    let prov_lc = provider.to_lowercase();
+    let id_lc = raw_model_id.to_lowercase();
+    match (prov_lc.as_str(), id_lc.as_str()) {
 ${exactMapEntries
   .map(({ rec, clean, provNote }) => {
-    return `        ("${rec.provider}", "${rec.raw_model_id}") => {
+    return `        ("${rec.provider.toLowerCase()}", "${rec.raw_model_id.toLowerCase()}") => {
             ${provNote}
             Some(
 ${emitRustCapabilityResult(clean, "                ")}
@@ -1014,7 +1093,9 @@ const rustGpt5Helpers = `
 // gpt5 boundary-aware token helpers (used by generated family resolver)
 // ---------------------------------------------------------------------------
 
-/// Returns true if \`model\` contains \`token\` at a word boundary (end-of-string or "-").
+/// Returns true if \`model\` contains \`token\` at left+right word boundaries.
+/// Left boundary: start-of-string or preceded by '-' or '.'.
+/// Right boundary: end-of-string or followed by '-'.
 /// Does not match if followed immediately by a digit or letter.
 fn gpt5_token_matches_rs(model: &str, token: &str) -> bool {
     let lower = model;
@@ -1026,6 +1107,15 @@ fn gpt5_token_matches_rs(model: &str, token: &str) -> bool {
             Some(rel_idx) => {
                 let abs_idx = start + rel_idx;
                 let after_idx = abs_idx + tok_lower.len();
+                // Left-boundary check: must start at string start or after '-' or '.'.
+                let left_ok = abs_idx == 0 || {
+                    let prev = lower.as_bytes()[abs_idx - 1];
+                    prev == b'-' || prev == b'.'
+                };
+                if !left_ok {
+                    start = after_idx;
+                    continue;
+                }
                 let after_char = lower[after_idx..].chars().next();
                 match after_char {
                     None | Some('-') => return true,
@@ -1047,6 +1137,15 @@ fn gpt5_base_matches_rs(model: &str, token: &str) -> bool {
             Some(rel_idx) => {
                 let abs_idx = start + rel_idx;
                 let after_idx = abs_idx + tok_lower.len();
+                // Left-boundary check: must start at string start or after '-' or '.'.
+                let left_ok = abs_idx == 0 || {
+                    let prev = lower.as_bytes()[abs_idx - 1];
+                    prev == b'-' || prev == b'.'
+                };
+                if !left_ok {
+                    start = after_idx;
+                    continue;
+                }
                 let suffix = &lower[after_idx..];
                 if suffix.is_empty() {
                     return true;
@@ -1056,16 +1155,12 @@ fn gpt5_base_matches_rs(model: &str, token: &str) -> bool {
                     continue;
                 }
                 let dash_rest = &suffix[1..];
-                // Reject -<1-3 digits> that look like version numbers.
-                let is_short_version = dash_rest
-                    .chars()
-                    .take(4)
-                    .enumerate()
-                    .all(|(i, c)| {
-                        if i < 3 { c.is_ascii_digit() }
-                        else { !c.is_ascii_alphanumeric() }
-                    })
-                    && dash_rest.chars().next().is_some_and(|c| c.is_ascii_digit());
+                // Reject -<1-3 digits> followed by non-alphanumeric or end (mirrors TS /^\\d{1,3}(?:[^a-z\\d]|$)/i).
+                let first_non_digit = dash_rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(dash_rest.len());
+                let is_short_version = first_non_digit >= 1
+                    && first_non_digit <= 3
+                    && (first_non_digit == dash_rest.len()
+                        || !dash_rest.as_bytes()[first_non_digit].is_ascii_alphanumeric());
                 if is_short_version {
                     start = after_idx;
                     continue;
@@ -1281,12 +1376,19 @@ ${registryLabelsArr
 // gpt5 boundary-aware token helpers
 // ---------------------------------------------------------------------------
 
+function hasLeftBoundaryGenerated(m: string, idx: number): boolean {
+  if (idx === 0) return true;
+  const prev = m[idx - 1];
+  return prev === "-" || prev === ".";
+}
+
 function gpt5TokenMatchesGenerated(m: string, token: string): boolean {
   let start = 0;
   while (true) {
     const idx = m.indexOf(token, start);
     if (idx === -1) return false;
     const afterIdx = idx + token.length;
+    if (!hasLeftBoundaryGenerated(m, idx)) { start = afterIdx; continue; }
     const afterChar = afterIdx < m.length ? m[afterIdx] : "";
     if (afterChar === "" || afterChar === "-") return true;
     start = afterIdx;
@@ -1299,6 +1401,7 @@ function gpt5BaseMatchesGenerated(m: string, token: string): boolean {
     const idx = m.indexOf(token, start);
     if (idx === -1) return false;
     const afterIdx = idx + token.length;
+    if (!hasLeftBoundaryGenerated(m, idx)) { start = afterIdx; continue; }
     const suffix = m.slice(afterIdx);
     if (suffix === "") return true;
     if (!suffix.startsWith("-")) { start = afterIdx; continue; }
@@ -1315,7 +1418,8 @@ function gpt5BaseMatchesGenerated(m: string, token: string): boolean {
 const EXACT_RECORDS = new Map<string, CapabilityResult>([
 ${tsExactEntries
   .map(({ rec, clean }) => {
-    return `  ["${rec.provider}::${rec.raw_model_id}", ${emitTsCapabilityResult(clean, "  ")}],`;
+    // Keys are lowercased at build time; resolveModelCapabilities lowercases at lookup time.
+    return `  ["${rec.provider.toLowerCase()}::${rec.raw_model_id.toLowerCase()}", ${emitTsCapabilityResult(clean, "  ")}],`;
   })
   .join("\n")}
 ]);
@@ -1376,8 +1480,8 @@ export function resolveModelCapabilities(
   provider: string,
   rawModelId: string,
 ): CapabilityResult {
-  // Step 1: raw exact lookup
-  const exactKey = \`\${provider}::\${rawModelId}\`;
+  // Step 1: raw exact lookup (case-insensitive — keys lowercased at build time)
+  const exactKey = \`\${provider.toLowerCase()}::\${rawModelId.toLowerCase()}\`;
   const exact = EXACT_RECORDS.get(exactKey);
   if (exact) return exact;
 
@@ -1448,5 +1552,5 @@ if (CHECK_MODE && checkFailed) {
   process.exit(1);
 }
 if (!CHECK_MODE) {
-  console.log("Done. Generated 3 files.");
+  console.log("Done. Generated 2 files.");
 }

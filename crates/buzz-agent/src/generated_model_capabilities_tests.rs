@@ -1,6 +1,7 @@
 //! Tests for generated model capabilities — normative corpus + handwritten supplements.
 //!
 //! This module is conditionally compiled as #[cfg(test)] from generated_model_capabilities.rs.
+//! It is hand-maintained (not regenerated) and lives outside the regen-diff gate.
 //!
 //! Three layers:
 //! 1. Shared normative corpus executed against the Rust interpreter — every vector in
@@ -139,8 +140,10 @@ mod shared_corpus_tests {
             // Canonicalize provider aliases before resolving — mirrors the
             // production path where Rust normalizes "openai-compat" → Provider::OpenAi
             // (config.rs) and the TS canonicalizeProvider() resolves "databricks-v2"
-            // → "databricks_v2" before generated lookups.
-            let canonical_provider = match provider {
+            // → "databricks_v2" before generated lookups.  Lowercase first so corpus
+            // vectors like provider="OpenAI" test case-insensitive normalization.
+            let provider_lc = provider.to_lowercase();
+            let canonical_provider = match provider_lc.as_str() {
                 "openai-compat" => "openai",
                 "databricks-v2" => "databricks_v2",
                 other => other,

@@ -75,7 +75,7 @@ export function getProviderEffortConfig(
 ): ProviderEffortConfig {
   const cap = resolveModelCapabilities(
     canonicalizeProvider(providerId),
-    model ?? "",
+    (model ?? "").trim(),
   );
   return {
     validValues: cap.supportedEfforts,

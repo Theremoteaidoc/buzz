@@ -33,14 +33,14 @@ const corpus = JSON.parse(
 // ----- Provider alias canonicalization -----
 // Mirrors production canonicalizeProvider() in desktop/src/features/agents/lib/formatAgentModelLabel.ts.
 // Applied before every generated lookup so alias vectors (e.g. "openai-compat") pass both interpreters.
-const PROVIDER_ALIASES = {
-  "databricks-v2": "databricks_v2",
-  "openai-compat": "openai",
-};
+const PROVIDER_ALIASES = new Map([
+  ["databricks-v2", "databricks_v2"],
+  ["openai-compat", "openai"],
+]);
 
 function canonicalizeProvider(provider) {
   const normalized = (provider ?? "").trim().toLowerCase();
-  return PROVIDER_ALIASES[normalized] ?? normalized;
+  return PROVIDER_ALIASES.get(normalized) ?? normalized;
 }
 
 // ----- Run corpus -----

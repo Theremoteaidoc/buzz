@@ -10,11 +10,14 @@ import {
  * - "openai-compat" → "openai": Rust already accepts "openai-compat" as Provider::OpenAi
  *   (crates/buzz-agent/src/config.rs); TS must canonicalize identically so the UI shows
  *   the same effort table that the Rust request path will apply.
+ *
+ * Map is used (not a plain object) to avoid prototype-chain collisions
+ * ("constructor", "__proto__", etc.) silently resolving to a built-in value.
  */
-const PROVIDER_ALIASES: Readonly<Record<string, string>> = {
-  "databricks-v2": "databricks_v2",
-  "openai-compat": "openai",
-};
+const PROVIDER_ALIASES = new Map<string, string>([
+  ["databricks-v2", "databricks_v2"],
+  ["openai-compat", "openai"],
+]);
 
 /**
  * Normalizes a provider id to the canonical form expected by the generated
@@ -25,7 +28,7 @@ const PROVIDER_ALIASES: Readonly<Record<string, string>> = {
  */
 export function canonicalizeProvider(provider: string): string {
   const normalized = provider.trim().toLowerCase();
-  return PROVIDER_ALIASES[normalized] ?? normalized;
+  return PROVIDER_ALIASES.get(normalized) ?? normalized;
 }
 
 /**

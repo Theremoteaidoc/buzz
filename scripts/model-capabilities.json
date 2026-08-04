@@ -1,5 +1,4 @@
 {
-  "$schema": "./model-capabilities-schema.json",
   "_comment": "Hand-curated model capability manifest. Edit here; run scripts/generate-model-capabilities.mjs to regenerate artifacts.",
   "_generated_by": "scripts/generate-model-capabilities.mjs",
   "_sources": {
@@ -437,13 +436,13 @@
     },
     {
       "id": "dbv2-gpt-code-names-segment",
-      "_comment": "DBv2-only rule: endpoint names containing a GPT segment prefix (gpt*) route via OpenAI Responses. Handles 'gpt', 'gpt5', 'gpt-5' segments. Priority < individual gpt5 family rules so explicit families take precedence.",
-      "match_kind": "segment-prefix",
+      "_comment": "DBv2-only rule: endpoint names with exact GPT segment route via OpenAI Responses. Handles segment-exact matches of \"gpt\" or \"gpt5\" (e.g. databricks-gpt-5.5 \u2192 segments include \"gpt\"). Priority > dbv2-claude (6 vs 5) restores old-contract: OpenAI checked before Claude for dual-marker names. segment match (not segment-prefix) prevents gptoss/gptj/gpt-neox false-positives.",
+      "match_kind": "segment",
       "match_value": "gpt",
       "providers": [
         "databricks_v2"
       ],
-      "match_priority": 5,
+      "match_priority": 6,
       "thinking_mode": "none",
       "supported_efforts": [
         "none",
@@ -455,7 +454,10 @@
       ],
       "default_effort": "medium",
       "databricks_v2_wire_route": "openai-responses",
-      "normalization_policy": "openai-clamp-max-to-xhigh"
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "match_aliases": [
+        "gpt5"
+      ]
     },
     {
       "id": "dbv2-sol-luna-terra-segment",
@@ -678,6 +680,34 @@
       "_reconciliation": "no-effort-divergence",
       "_reconciliation_note": "models.dev advertises reasoning_options=[{\"type\":\"budget_tokens\",\"min\":1024}]. This is a different capability axis (extended thinking token budget), not an effort-level selector. No effort divergence to reconcile \u2014 efforts for this model come from the anthropic family rule (anthropic-adaptive-xhigh-opus-4-7).",
       "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-07-31, SHA-256 d5a4974cd69f19b0f67713acaa6bb3b16e920defdc07ecbdf6b0a936181bb0e0): providers.databricks.models[\"databricks-claude-opus-4-7\"].reasoning_options=[{\"type\":\"budget_tokens\",\"min\":1024}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-5-6-luna",
+      "registry_label": "GPT-5.6 Luna",
+      "supported_efforts_override": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "source": "models.dev reasoning_options: low|medium|high",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "models.dev advertises [low, medium, high]. Family rule (gpt5-6) has none+xhigh+max; luna endpoint does not expose none, xhigh, or max. Provider-advertised wins.",
+      "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-08-04): providers.databricks.models[\"databricks-gpt-5-6-luna\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"low\",\"medium\",\"high\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gpt-5-6-terra",
+      "registry_label": "GPT-5.6 Terra",
+      "supported_efforts_override": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "source": "models.dev reasoning_options: low|medium|high",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "models.dev advertises [low, medium, high]. Family rule (gpt5-6) has none+xhigh+max; terra endpoint does not expose none, xhigh, or max. Provider-advertised wins.",
+      "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-08-04): providers.databricks.models[\"databricks-gpt-5-6-terra\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"low\",\"medium\",\"high\"]}]"
     }
   ],
   "provider_fallbacks": {

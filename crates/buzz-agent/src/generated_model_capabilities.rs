@@ -94,8 +94,11 @@ pub struct CapabilityResult {
 
 /// Returns the exact capability record for a provider-qualified raw model ID,
 /// if one exists in the manifest. This is checked BEFORE any prefix stripping.
+/// Matching is case-insensitive — both inputs are lowercased before comparison.
 pub fn lookup_exact(provider: &str, raw_model_id: &str) -> Option<CapabilityResult> {
-    match (provider, raw_model_id) {
+    let prov_lc = provider.to_lowercase();
+    let id_lc = raw_model_id.to_lowercase();
+    match (prov_lc.as_str(), id_lc.as_str()) {
         ("databricks_v2", "databricks-gpt-5-4-mini") => {
             // provenance: exact(databricks_v2::databricks-gpt-5-4-mini)
             //   registry_label: exact_record
@@ -202,6 +205,48 @@ pub fn lookup_exact(provider: &str, raw_model_id: &str) -> Option<CapabilityResu
                 default_effort: Some(ThinkingEffort::High),
                 databricks_v2_wire_route: DatabricksV2Route::AnthropicMessages,
                 normalization_policy: NormalizationPolicy::None,
+            })
+        }
+        ("databricks_v2", "databricks-gpt-5-6-luna") => {
+            // provenance: exact(databricks_v2::databricks-gpt-5-6-luna)
+            //   registry_label: exact_record
+            //   supported_efforts: exact_record
+            //   databricks_v2_wire_route: family:openai-gpt5-6@15
+            //   thinking_mode: family:openai-gpt5-6@15
+            //   normalization_policy: family:openai-gpt5-6@15
+            //   default_effort: family:openai-gpt5-6@15
+            Some(CapabilityResult {
+                registry_label: Some("GPT-5.6 Luna"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::OpenAiResponses,
+                normalization_policy: NormalizationPolicy::OpenAiStandard,
+            })
+        }
+        ("databricks_v2", "databricks-gpt-5-6-terra") => {
+            // provenance: exact(databricks_v2::databricks-gpt-5-6-terra)
+            //   registry_label: exact_record
+            //   supported_efforts: exact_record
+            //   databricks_v2_wire_route: family:openai-gpt5-6@15
+            //   thinking_mode: family:openai-gpt5-6@15
+            //   normalization_policy: family:openai-gpt5-6@15
+            //   default_effort: family:openai-gpt5-6@15
+            Some(CapabilityResult {
+                registry_label: Some("GPT-5.6 Terra"),
+                thinking_mode: ThinkingMode::None,
+                supported_efforts: Cow::Borrowed(&[
+                    ThinkingEffort::Low,
+                    ThinkingEffort::Medium,
+                    ThinkingEffort::High,
+                ]),
+                default_effort: Some(ThinkingEffort::Medium),
+                databricks_v2_wire_route: DatabricksV2Route::OpenAiResponses,
+                normalization_policy: NormalizationPolicy::OpenAiStandard,
             })
         }
         _ => None,
@@ -957,6 +1002,31 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
             normalization_policy: NormalizationPolicy::OpenAiStandard,
         });
     }
+    // rule: dbv2-gpt-code-names-segment, provider: databricks_v2, priority: 6
+    if provider == "databricks_v2"
+        && (lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|s| s == "gpt")
+            || lower
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|s| s == "gpt5"))
+    {
+        return Some(CapabilityResult {
+            registry_label: None,
+            thinking_mode: ThinkingMode::None,
+            supported_efforts: Cow::Borrowed(&[
+                ThinkingEffort::None,
+                ThinkingEffort::Minimal,
+                ThinkingEffort::Low,
+                ThinkingEffort::Medium,
+                ThinkingEffort::High,
+                ThinkingEffort::XHigh,
+            ]),
+            default_effort: Some(ThinkingEffort::Medium),
+            databricks_v2_wire_route: DatabricksV2Route::OpenAiResponses,
+            normalization_policy: NormalizationPolicy::OpenAiClampMaxToXHigh,
+        });
+    }
     // rule: dbv2-claude-code-names-segment, provider: databricks_v2, priority: 5
     if provider == "databricks_v2"
         && (lower
@@ -991,28 +1061,6 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
             default_effort: Some(ThinkingEffort::High),
             databricks_v2_wire_route: DatabricksV2Route::AnthropicMessages,
             normalization_policy: NormalizationPolicy::None,
-        });
-    }
-    // rule: dbv2-gpt-code-names-segment, provider: databricks_v2, priority: 5
-    if provider == "databricks_v2"
-        && (lower
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .any(|s| s.starts_with("gpt")))
-    {
-        return Some(CapabilityResult {
-            registry_label: None,
-            thinking_mode: ThinkingMode::None,
-            supported_efforts: Cow::Borrowed(&[
-                ThinkingEffort::None,
-                ThinkingEffort::Minimal,
-                ThinkingEffort::Low,
-                ThinkingEffort::Medium,
-                ThinkingEffort::High,
-                ThinkingEffort::XHigh,
-            ]),
-            default_effort: Some(ThinkingEffort::Medium),
-            databricks_v2_wire_route: DatabricksV2Route::OpenAiResponses,
-            normalization_policy: NormalizationPolicy::OpenAiClampMaxToXHigh,
         });
     }
     // rule: dbv2-sol-luna-terra-segment, provider: databricks_v2, priority: 5
@@ -1334,7 +1382,9 @@ pub const DATABRICKS_MODEL_NAMES: &[(&str, &str)] = &[
 // gpt5 boundary-aware token helpers (used by generated family resolver)
 // ---------------------------------------------------------------------------
 
-/// Returns true if `model` contains `token` at a word boundary (end-of-string or "-").
+/// Returns true if `model` contains `token` at left+right word boundaries.
+/// Left boundary: start-of-string or preceded by '-' or '.'.
+/// Right boundary: end-of-string or followed by '-'.
 /// Does not match if followed immediately by a digit or letter.
 fn gpt5_token_matches_rs(model: &str, token: &str) -> bool {
     let lower = model;
@@ -1346,6 +1396,15 @@ fn gpt5_token_matches_rs(model: &str, token: &str) -> bool {
             Some(rel_idx) => {
                 let abs_idx = start + rel_idx;
                 let after_idx = abs_idx + tok_lower.len();
+                // Left-boundary check: must start at string start or after '-' or '.'.
+                let left_ok = abs_idx == 0 || {
+                    let prev = lower.as_bytes()[abs_idx - 1];
+                    prev == b'-' || prev == b'.'
+                };
+                if !left_ok {
+                    start = after_idx;
+                    continue;
+                }
                 let after_char = lower[after_idx..].chars().next();
                 match after_char {
                     None | Some('-') => return true,
@@ -1367,6 +1426,15 @@ fn gpt5_base_matches_rs(model: &str, token: &str) -> bool {
             Some(rel_idx) => {
                 let abs_idx = start + rel_idx;
                 let after_idx = abs_idx + tok_lower.len();
+                // Left-boundary check: must start at string start or after '-' or '.'.
+                let left_ok = abs_idx == 0 || {
+                    let prev = lower.as_bytes()[abs_idx - 1];
+                    prev == b'-' || prev == b'.'
+                };
+                if !left_ok {
+                    start = after_idx;
+                    continue;
+                }
                 let suffix = &lower[after_idx..];
                 if suffix.is_empty() {
                     return true;
@@ -1376,15 +1444,14 @@ fn gpt5_base_matches_rs(model: &str, token: &str) -> bool {
                     continue;
                 }
                 let dash_rest = &suffix[1..];
-                // Reject -<1-3 digits> that look like version numbers.
-                let is_short_version =
-                    dash_rest.chars().take(4).enumerate().all(|(i, c)| {
-                        if i < 3 {
-                            c.is_ascii_digit()
-                        } else {
-                            !c.is_ascii_alphanumeric()
-                        }
-                    }) && dash_rest.chars().next().is_some_and(|c| c.is_ascii_digit());
+                // Reject -<1-3 digits> followed by non-alphanumeric or end (mirrors TS /^\d{1,3}(?:[^a-z\d]|$)/i).
+                let first_non_digit = dash_rest
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(dash_rest.len());
+                let is_short_version = first_non_digit >= 1
+                    && first_non_digit <= 3
+                    && (first_non_digit == dash_rest.len()
+                        || !dash_rest.as_bytes()[first_non_digit].is_ascii_alphanumeric());
                 if is_short_version {
                     start = after_idx;
                     continue;

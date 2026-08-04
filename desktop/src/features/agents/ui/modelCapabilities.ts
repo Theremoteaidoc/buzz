@@ -87,12 +87,19 @@ export const DATABRICKS_MODEL_NAMES: Map<string, string> = new Map([
 // gpt5 boundary-aware token helpers
 // ---------------------------------------------------------------------------
 
+function hasLeftBoundaryGenerated(m: string, idx: number): boolean {
+  if (idx === 0) return true;
+  const prev = m[idx - 1];
+  return prev === "-" || prev === ".";
+}
+
 function gpt5TokenMatchesGenerated(m: string, token: string): boolean {
   let start = 0;
   while (true) {
     const idx = m.indexOf(token, start);
     if (idx === -1) return false;
     const afterIdx = idx + token.length;
+    if (!hasLeftBoundaryGenerated(m, idx)) { start = afterIdx; continue; }
     const afterChar = afterIdx < m.length ? m[afterIdx] : "";
     if (afterChar === "" || afterChar === "-") return true;
     start = afterIdx;
@@ -105,6 +112,7 @@ function gpt5BaseMatchesGenerated(m: string, token: string): boolean {
     const idx = m.indexOf(token, start);
     if (idx === -1) return false;
     const afterIdx = idx + token.length;
+    if (!hasLeftBoundaryGenerated(m, idx)) { start = afterIdx; continue; }
     const suffix = m.slice(afterIdx);
     if (suffix === "") return true;
     if (!suffix.startsWith("-")) { start = afterIdx; continue; }
@@ -158,6 +166,22 @@ const EXACT_RECORDS = new Map<string, CapabilityResult>([
       defaultEffort: "high",
       databricksV2WireRoute: "anthropic-messages",
       normalizationPolicy: "none",
+    }],
+  ["databricks_v2::databricks-gpt-5-6-luna", {
+      registryLabel: "GPT-5.6 Luna",
+      thinkingMode: "none",
+      supportedEfforts: ["low", "medium", "high"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "openai-responses",
+      normalizationPolicy: "openai-standard",
+    }],
+  ["databricks_v2::databricks-gpt-5-6-terra", {
+      registryLabel: "GPT-5.6 Terra",
+      thinkingMode: "none",
+      supportedEfforts: ["low", "medium", "high"] as const,
+      defaultEffort: "medium",
+      databricksV2WireRoute: "openai-responses",
+      normalizationPolicy: "openai-standard",
     }],
 ]);
 
@@ -737,6 +761,17 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
           normalizationPolicy: "openai-standard",
         };
   }
+  // rule: dbv2-gpt-code-names-segment, provider: databricks_v2, priority: 6
+  if (provider === "databricks_v2" && (lower.split(/[^a-z0-9]+/).includes("gpt") || lower.split(/[^a-z0-9]+/).includes("gpt5"))) {
+    return {
+          registryLabel: null,
+          thinkingMode: "none",
+          supportedEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
+          defaultEffort: "medium",
+          databricksV2WireRoute: "openai-responses",
+          normalizationPolicy: "openai-clamp-max-to-xhigh",
+        };
+  }
   // rule: dbv2-claude-code-names-segment, provider: databricks_v2, priority: 5
   if (provider === "databricks_v2" && (lower.split(/[^a-z0-9]+/).includes("claude") || lower.split(/[^a-z0-9]+/).includes("opus") || lower.split(/[^a-z0-9]+/).includes("sonnet") || lower.split(/[^a-z0-9]+/).includes("haiku") || lower.split(/[^a-z0-9]+/).includes("mythos") || lower.split(/[^a-z0-9]+/).includes("fable"))) {
     return {
@@ -746,17 +781,6 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
           defaultEffort: "high",
           databricksV2WireRoute: "anthropic-messages",
           normalizationPolicy: "none",
-        };
-  }
-  // rule: dbv2-gpt-code-names-segment, provider: databricks_v2, priority: 5
-  if (provider === "databricks_v2" && (lower.split(/[^a-z0-9]+/).some(s => s.startsWith("gpt")))) {
-    return {
-          registryLabel: null,
-          thinkingMode: "none",
-          supportedEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
-          defaultEffort: "medium",
-          databricksV2WireRoute: "openai-responses",
-          normalizationPolicy: "openai-clamp-max-to-xhigh",
         };
   }
   // rule: dbv2-sol-luna-terra-segment, provider: databricks_v2, priority: 5
@@ -792,8 +816,8 @@ export function resolveModelCapabilities(
   provider: string,
   rawModelId: string,
 ): CapabilityResult {
-  // Step 1: raw exact lookup
-  const exactKey = `${provider}::${rawModelId}`;
+  // Step 1: raw exact lookup (case-insensitive — keys lowercased at build time)
+  const exactKey = `${provider.toLowerCase()}::${rawModelId.toLowerCase()}`;
   const exact = EXACT_RECORDS.get(exactKey);
   if (exact) return exact;
 

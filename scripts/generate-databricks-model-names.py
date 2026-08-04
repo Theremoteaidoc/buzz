@@ -29,7 +29,7 @@ TS_OUT = REPO_ROOT / "desktop/src/features/agents/lib/databricksModelNames.ts"
 
 # Allowed characters in endpoint IDs and curated names.
 SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]*$")
-SAFE_NAME_RE = re.compile(r"^[^\x00-\x1f\"\\<>&]*$")
+SAFE_NAME_RE = re.compile(r"^[^\x00-\x1f\"\\<>&]+$")
 
 
 def fetch(url: str) -> bytes:

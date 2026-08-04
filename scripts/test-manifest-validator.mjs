@@ -410,4 +410,132 @@ test("schema-negative: exact_record registry_label with unsafe chars is rejected
   );
 });
 
+// ---------------------------------------------------------------------------
+// Rule: exact_record supported_efforts_override must be non-empty
+// ---------------------------------------------------------------------------
+test("schema-negative: exact_record empty supported_efforts_override is rejected", () => {
+  assertRejects(
+    "exact_record empty supported_efforts_override",
+    mutate((m) => {
+      const rec = m.exact_records.find((r) => r.raw_model_id === "databricks-gpt-5-4-mini");
+      rec.supported_efforts_override = [];
+    }),
+    "supported_efforts_override",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: exact_record supported_efforts_override with invalid enum value
+// ---------------------------------------------------------------------------
+test("schema-negative: exact_record supported_efforts_override with bogus enum is rejected", () => {
+  assertRejects(
+    "exact_record bogus effort enum",
+    mutate((m) => {
+      const rec = m.exact_records.find((r) => r.raw_model_id === "databricks-gpt-5-4-mini");
+      rec.supported_efforts_override = ["ultra-high"];
+    }),
+    "supported_efforts_override",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: exact_record supported_efforts_override with duplicate effort
+// ---------------------------------------------------------------------------
+test("schema-negative: exact_record supported_efforts_override with duplicate effort is rejected", () => {
+  assertRejects(
+    "exact_record duplicate effort",
+    mutate((m) => {
+      const rec = m.exact_records.find((r) => r.raw_model_id === "databricks-gpt-5-4-mini");
+      rec.supported_efforts_override = ["low", "low"];
+    }),
+    "duplicate",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: exact_record supported_efforts_override must follow canonical order
+// ---------------------------------------------------------------------------
+test("schema-negative: exact_record supported_efforts_override out of canonical order is rejected", () => {
+  assertRejects(
+    "exact_record efforts out of order",
+    mutate((m) => {
+      const rec = m.exact_records.find((r) => r.raw_model_id === "databricks-gpt-5-4-mini");
+      // Reverse order — [high, medium, low] is not canonical [low, medium, high]
+      rec.supported_efforts_override = ["high", "medium", "low"];
+    }),
+    "canonical order",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: exact_record default_effort not in supported_efforts_override
+// ---------------------------------------------------------------------------
+test("schema-negative: exact_record default_effort not in supported_efforts_override is rejected", () => {
+  assertRejects(
+    "exact_record default_effort outside override",
+    mutate((m) => {
+      const rec = m.exact_records.find((r) => r.raw_model_id === "databricks-gpt-5-4-mini");
+      rec.supported_efforts_override = ["low", "medium"];
+      rec.default_effort = "high"; // not in override
+    }),
+    "default_effort",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: exact_record match_priority must be a non-negative integer
+// ---------------------------------------------------------------------------
+test("schema-negative: exact_record match_priority non-integer is rejected", () => {
+  assertRejects(
+    "exact_record match_priority non-integer",
+    mutate((m) => {
+      const rec = m.exact_records.find((r) => r.raw_model_id === "databricks-gpt-5-4-mini");
+      rec.match_priority = "five";
+    }),
+    "match_priority",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: exact_record thinking_mode must be a valid enum
+// ---------------------------------------------------------------------------
+test("schema-negative: exact_record invalid thinking_mode is rejected", () => {
+  assertRejects(
+    "exact_record invalid thinking_mode",
+    mutate((m) => {
+      const rec = m.exact_records.find((r) => r.raw_model_id === "databricks-gpt-5-4-mini");
+      rec.thinking_mode = "turbo-thinking";
+    }),
+    "thinking_mode",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: exact_record databricks_v2_wire_route must be a valid enum
+// ---------------------------------------------------------------------------
+test("schema-negative: exact_record invalid databricks_v2_wire_route is rejected", () => {
+  assertRejects(
+    "exact_record invalid wire_route",
+    mutate((m) => {
+      const rec = m.exact_records.find((r) => r.raw_model_id === "databricks-gpt-5-4-mini");
+      rec.databricks_v2_wire_route = "http-sse";
+    }),
+    "databricks_v2_wire_route",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: exact_record normalization_policy must be a valid enum
+// ---------------------------------------------------------------------------
+test("schema-negative: exact_record invalid normalization_policy is rejected", () => {
+  assertRejects(
+    "exact_record invalid normalization_policy",
+    mutate((m) => {
+      const rec = m.exact_records.find((r) => r.raw_model_id === "databricks-gpt-5-4-mini");
+      rec.normalization_policy = "pass-through-all";
+    }),
+    "normalization_policy",
+  );
+});
+
 console.log("\nSchema-negative validator tests complete.");
