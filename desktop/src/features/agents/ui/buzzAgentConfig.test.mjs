@@ -704,7 +704,6 @@ test("openai-compat alias handles mixed case + whitespace: '  OpenAI-Compat  ' c
   assert.equal(messy.defaultValue, canonical.defaultValue);
 });
 
-
 // ---------------------------------------------------------------------------
 // PROVIDER_FALLBACKS prototype-key safety regression
 // ---------------------------------------------------------------------------
@@ -712,31 +711,41 @@ test("openai-compat alias handles mixed case + whitespace: '  OpenAI-Compat  ' c
 test("prototype-key safety: provider='constructor' returns a complete record (Map prevents prototype leak)", () => {
   const result = getProviderEffortConfig("constructor", "some-model");
   // Must not crash and must return a non-empty validValues (complete record)
-  assert.ok(Array.isArray(result.validValues) && result.validValues.length > 0,
-    "constructor provider must return a complete record (not an empty/broken result from prototype chain)");
+  assert.ok(
+    Array.isArray(result.validValues) && result.validValues.length > 0,
+    "constructor provider must return a complete record (not an empty/broken result from prototype chain)",
+  );
 });
 
 test("prototype-key safety: provider='__proto__' returns a complete record", () => {
   const result = getProviderEffortConfig("__proto__", "some-model");
-  assert.ok(Array.isArray(result.validValues) && result.validValues.length > 0,
-    "__proto__ provider must return a complete record");
+  assert.ok(
+    Array.isArray(result.validValues) && result.validValues.length > 0,
+    "__proto__ provider must return a complete record",
+  );
 });
 
 test("prototype-key safety: provider='hasOwnProperty' returns a complete record", () => {
   const result = getProviderEffortConfig("hasOwnProperty", "some-model");
-  assert.ok(Array.isArray(result.validValues) && result.validValues.length > 0,
-    "hasOwnProperty provider must return a complete record");
+  assert.ok(
+    Array.isArray(result.validValues) && result.validValues.length > 0,
+    "hasOwnProperty provider must return a complete record",
+  );
 });
 
 test("prototype-key safety: provider='toString' returns a complete record", () => {
   const result = getProviderEffortConfig("toString", "some-model");
-  assert.ok(Array.isArray(result.validValues) && result.validValues.length > 0,
-    "toString provider must return a complete record");
+  assert.ok(
+    Array.isArray(result.validValues) && result.validValues.length > 0,
+    "toString provider must return a complete record",
+  );
 });
 
 test("prototype-key safety: validValues.includes() does not throw for prototype-key provider", () => {
   // This exercises the crash path: EffortSelectField calls validValues.includes()
   const result = getProviderEffortConfig("constructor", "some-model");
-  assert.doesNotThrow(() => result.validValues.includes("low"),
-    "validValues.includes() must not throw for prototype-key providers");
+  assert.doesNotThrow(
+    () => result.validValues.includes("low"),
+    "validValues.includes() must not throw for prototype-key providers",
+  );
 });
