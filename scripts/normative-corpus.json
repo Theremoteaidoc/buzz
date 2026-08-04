@@ -885,7 +885,16 @@
     "id": "dbv2-customgpt-not-responses",
     "provider": "databricks_v2",
     "raw_model_id": "customgpt-5-5-endpoint",
-    "_note": "customgpt-5-5-endpoint strips to gpt-5-5-endpoint \u2192 gpt5-5 family \u2192 openai-responses (correct behavior after strip). Segment rule with exact \"gpt\" still correctly excludes gptoss/gptj.",
+    "_note": "customgpt-5-5-endpoint strips to gpt-5-5-endpoint → gpt5-5 family → openai-responses (correct behavior after strip). Segment rule with exact \"gpt\" still correctly excludes gptoss/gptj.",
+    "expect": {
+      "databricks_v2_wire_route": "openai-responses"
+    }
+  },
+  {
+    "id": "dbv2-gpt-neox-residual-collision",
+    "provider": "databricks_v2",
+    "raw_model_id": "gpt-neox-20b",
+    "_note": "Residual-collision pin (not an endorsement): 'gpt-neox-20b' splits to segments ['gpt','neox','20b'], so 'gpt' exactly matches and routes openai-responses. gptoss/gptj are fixed; gpt-neox is a known residual of exact-segment matching. Pinned here so any future fix surfaces as a test change.",
     "expect": {
       "databricks_v2_wire_route": "openai-responses"
     }

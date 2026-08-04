@@ -436,7 +436,7 @@
     },
     {
       "id": "dbv2-gpt-code-names-segment",
-      "_comment": "DBv2-only rule: endpoint names with exact GPT segment route via OpenAI Responses. Handles segment-exact matches of \"gpt\" or \"gpt5\" (e.g. databricks-gpt-5.5 \u2192 segments include \"gpt\"). Priority > dbv2-claude (6 vs 5) restores old-contract: OpenAI checked before Claude for dual-marker names. segment match (not segment-prefix) prevents gptoss/gptj/gpt-neox false-positives.",
+      "_comment": "DBv2-only rule: endpoint names with exact GPT segment route via OpenAI Responses. Handles segment-exact matches of \"gpt\" or \"gpt5\" (e.g. databricks-gpt-5.5 \u2192 segments include \"gpt\"). Priority > dbv2-claude (6 vs 5) restores old-contract: OpenAI checked before Claude for dual-marker names. segment match (not segment-prefix) prevents gptoss/gptj false-positives. Note: gpt-neox is a residual collision — ‘gpt-neox’ segments to [‘gpt’,‘neox’], so ‘gpt’ matches and it routes openai-responses. This is pinned as known behavior in the normative corpus, not an endorsement.",
       "match_kind": "segment",
       "match_value": "gpt",
       "providers": [

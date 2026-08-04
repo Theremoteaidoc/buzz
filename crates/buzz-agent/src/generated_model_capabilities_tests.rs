@@ -23,7 +23,7 @@ mod shared_corpus_tests {
 
     use crate::config::ThinkingEffort;
     use crate::generated_model_capabilities::{
-        resolve_model_capabilities, DatabricksV2Route, ThinkingMode,
+        resolve_model_capabilities, DatabricksV2Route, NormalizationPolicy, ThinkingMode,
     };
     use serde::Deserialize;
     use std::path::Path;
@@ -46,6 +46,8 @@ mod shared_corpus_tests {
         supported_efforts: Option<Vec<String>>,
         default_effort: Option<serde_json::Value>, // string or null
         databricks_v2_wire_route: Option<String>,
+        normalization_policy: Option<String>,
+        registry_label: Option<serde_json::Value>, // string or null
     }
 
     // ---------------------------------------------------------------------------
@@ -84,6 +86,15 @@ mod shared_corpus_tests {
             "route-unknown" => DatabricksV2Route::RouteUnknown,
             "not-applicable" => DatabricksV2Route::NotApplicable,
             other => panic!("unknown databricks_v2_wire_route in corpus: {other}"),
+        }
+    }
+
+    fn parse_normalization_policy(s: &str) -> NormalizationPolicy {
+        match s {
+            "none" => NormalizationPolicy::None,
+            "openai-standard" => NormalizationPolicy::OpenAiStandard,
+            "openai-clamp-max-to-xhigh" => NormalizationPolicy::OpenAiClampMaxToXHigh,
+            other => panic!("unknown normalization_policy in corpus: {other}"),
         }
     }
 
@@ -202,6 +213,35 @@ mod shared_corpus_tests {
                     ));
                 }
             }
+
+            // Check normalization_policy if present
+            if let Some(expected_policy) = &expect.normalization_policy {
+                let expected = parse_normalization_policy(expected_policy);
+                if result.normalization_policy != expected {
+                    failures.push(format!(
+                        "[{id}] normalization_policy: got {:?}, expected {:?}",
+                        result.normalization_policy, expected
+                    ));
+                }
+            }
+
+            // Check registry_label if present (JSON string or null)
+            if let Some(expected_rl) = &expect.registry_label {
+                let expected_opt: Option<&str> = match expected_rl {
+                    serde_json::Value::Null => None,
+                    serde_json::Value::String(s) => Some(s.as_str()),
+                    other => panic!(
+                        "unexpected registry_label value in corpus vector {id}: {other:?}"
+                    ),
+                };
+                if result.registry_label != expected_opt {
+                    failures.push(format!(
+                        "[{id}] registry_label: got {:?}, expected {:?}",
+                        result.registry_label, expected_opt
+                    ));
+                }
+            }
+
         }
 
         if !failures.is_empty() {
