@@ -290,6 +290,7 @@ const VALID_MATCH_KINDS = [
   "gpt5-base",
   "segment",
   "segment-prefix",
+  "gpt-version-segment",
 ];
 
 function assertEnum(value, valid, label) {
@@ -304,13 +305,32 @@ function assertNonEmpty(arr, label) {
   }
 }
 
+/**
+ * Shared effort-list validator: non-empty, all valid enum values, no duplicates,
+ * canonical sort order (Rust clamp logic depends on sorted order).
+ */
+function assertEfforts(efforts, label) {
+  assertNonEmpty(efforts, label);
+  const seen = new Set();
+  for (const e of efforts) {
+    assertEnum(e, VALID_EFFORTS, `${label}[]`);
+    if (seen.has(e)) throw new Error(`${label}: duplicate effort "${e}"`);
+    seen.add(e);
+  }
+  const indices = efforts.map((e) => VALID_EFFORTS.indexOf(e));
+  for (let i = 1; i < indices.length; i++) {
+    if (indices[i] <= indices[i - 1]) {
+      throw new Error(
+        `${label}: must follow canonical order [${VALID_EFFORTS.join(", ")}]; got [${efforts.join(", ")}]`,
+      );
+    }
+  }
+}
+
 function validateFallbackRecord(rec, label) {
   assertEnum(rec.databricks_v2_wire_route, VALID_DBV2_ROUTES, `${label}.databricks_v2_wire_route`);
   assertEnum(rec.thinking_mode, VALID_THINKING_MODES, `${label}.thinking_mode`);
-  assertNonEmpty(rec.supported_efforts, `${label}.supported_efforts`);
-  for (const e of rec.supported_efforts) {
-    assertEnum(e, VALID_EFFORTS, `${label}.supported_efforts[]`);
-  }
+  assertEfforts(rec.supported_efforts, `${label}.supported_efforts`);
   if (rec.default_effort !== null) {
     assertEnum(rec.default_effort, VALID_EFFORTS, `${label}.default_effort`);
     if (!rec.supported_efforts.includes(rec.default_effort)) {
@@ -334,10 +354,11 @@ for (const rule of manifest.family_rules) {
   seenRuleIds.add(rule.id);
   assertEnum(rule.match_kind, VALID_MATCH_KINDS, `rule ${rule.id} match_kind`);
   assertEnum(rule.thinking_mode, VALID_THINKING_MODES, `rule ${rule.id} thinking_mode`);
-  assertNonEmpty(rule.supported_efforts, `rule ${rule.id} supported_efforts`);
-  for (const e of rule.supported_efforts) {
-    assertEnum(e, VALID_EFFORTS, `rule ${rule.id} supported_efforts[]`);
+  // match_priority must be a non-negative integer (interpolated into Rust comments and TS code)
+  if (!Number.isInteger(rule.match_priority) || rule.match_priority < 0) {
+    throw new Error(`rule ${rule.id}: match_priority must be a non-negative integer, got ${JSON.stringify(rule.match_priority)}`);
   }
+  assertEfforts(rule.supported_efforts, `rule ${rule.id} supported_efforts`);
   if (rule.default_effort !== null) {
     assertEnum(rule.default_effort, VALID_EFFORTS, `rule ${rule.id} default_effort`);
     if (!rule.supported_efforts.includes(rule.default_effort)) {
@@ -368,39 +389,25 @@ for (const [provider, fb] of Object.entries(manifest.provider_fallbacks)) {
 }
 
 // Validate exact_records — full invariant checks on every override axis
+// Keys are normalized to lowercase before duplicate detection to match build-time key lowercasing.
 const seenExactKeys = new Set();
 for (const rec of manifest.exact_records ?? []) {
   if (!rec.provider || !rec.raw_model_id)
     throw new Error("exact_record missing provider or raw_model_id");
-  const key = `${rec.provider}::${rec.raw_model_id}`;
+  // Normalize to lowercase — both emitters lowercase provider+raw_model_id at build time
+  const key = `${rec.provider.toLowerCase()}::${rec.raw_model_id.toLowerCase()}`;
   if (seenExactKeys.has(key)) throw new Error(`duplicate exact_record key: ${key}`);
   seenExactKeys.add(key);
 
-  // Validate match_priority: must be a non-negative integer if present (injected into comments).
+  // Validate match_priority: must be a non-negative integer if present (interpolated into source).
   if (rec.match_priority !== undefined) {
     if (!Number.isInteger(rec.match_priority) || rec.match_priority < 0)
       throw new Error(`exact_record ${key}: match_priority must be a non-negative integer`);
   }
 
-  // Validate supported_efforts_override if present.
+  // Validate supported_efforts_override if present (shared validator: non-empty, no dupes, canonical order).
   if (rec.supported_efforts_override !== undefined) {
-    assertNonEmpty(rec.supported_efforts_override, `exact_record ${key} supported_efforts_override`);
-    const seenEfforts = new Set();
-    for (const e of rec.supported_efforts_override) {
-      assertEnum(e, VALID_EFFORTS, `exact_record ${key} supported_efforts_override[]`);
-      if (seenEfforts.has(e))
-        throw new Error(`exact_record ${key}: duplicate effort "${e}" in supported_efforts_override`);
-      seenEfforts.add(e);
-    }
-    // Validate ordering matches canonical effort order (Rust clamp assumes sorted).
-    const canonicalIndices = rec.supported_efforts_override.map((e) => VALID_EFFORTS.indexOf(e));
-    for (let i = 1; i < canonicalIndices.length; i++) {
-      if (canonicalIndices[i] <= canonicalIndices[i - 1]) {
-        throw new Error(
-          `exact_record ${key}: supported_efforts_override must follow canonical order [${VALID_EFFORTS.join(", ")}]; got [${rec.supported_efforts_override.join(", ")}]`,
-        );
-      }
-    }
+    assertEfforts(rec.supported_efforts_override, `exact_record ${key} supported_efforts_override`);
     // Validate default_effort is in the override if present.
     if (rec.default_effort !== undefined && rec.default_effort !== null) {
       assertEnum(rec.default_effort, VALID_EFFORTS, `exact_record ${key} default_effort`);
@@ -431,23 +438,53 @@ for (const rec of manifest.exact_records ?? []) {
   }
 }
 
+// Post-inheritance materialized validation for exact_records.
+// An exact_record with no supported_efforts_override inherits the family default — validate
+// that the final materialized default_effort is within the final materialized supported_efforts.
+for (const rec of manifest.exact_records ?? []) {
+  const key = `${rec.provider.toLowerCase()}::${rec.raw_model_id.toLowerCase()}`;
+  const materializedResult = resolve(rec.provider, rec.raw_model_id);
+  const matEfforts = materializedResult.supported_efforts;
+  const matDefault = materializedResult.default_effort;
+  if (matDefault !== undefined && matDefault !== null) {
+    if (!matEfforts.includes(matDefault)) {
+      throw new Error(
+        `exact_record ${key}: materialized default_effort "${matDefault}" not in materialized supported_efforts [${matEfforts.join(", ")}] (check family default inheritance)`,
+      );
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Resolution engine (mirrors plan resolver contract)
 // ---------------------------------------------------------------------------
 
 /**
  * Strip catalog prefix to get the normalized alias for family-rule matching.
- * Finds the first occurrence of a known family token and returns from there.
- * e.g. "goose-claude-fable-5" → "claude-fable-5"
- *      "databricks-gpt-5.5"   → "gpt-5.5"
- *      "claude-opus-4-7"      → "claude-opus-4-7"  (no prefix)
+ * Finds the first boundary-aligned occurrence of a known family token and returns from there.
+ * Boundary-aligned: the token must start at position 0 or be preceded by a non-alphanumeric char.
+ * This prevents "customgpt-5-5-endpoint" from stripping to "gpt-5-5-endpoint" via "gpt-" inside
+ * the "customgpt-" prefix.
+ * e.g. "goose-claude-fable-5" → "claude-fable-5"   (boundary: preceded by "-")
+ *      "databricks-gpt-5.5"   → "gpt-5.5"           (boundary: preceded by "-")
+ *      "claude-opus-4-7"      → "claude-opus-4-7"   (no prefix, already at boundary)
+ *      "customgpt-5-5-ep"     → "customgpt-5-5-ep"  (no boundary match: 'g' preceded by 'm')
  */
 function stripCatalogPrefix(model) {
   const lower = model.toLowerCase();
   let firstIdx = Infinity;
   for (const tok of manifest.family_tokens) {
-    const idx = lower.indexOf(tok);
-    if (idx !== -1 && idx < firstIdx) firstIdx = idx;
+    let start = 0;
+    while (true) {
+      const idx = lower.indexOf(tok, start);
+      if (idx === -1) break;
+      // Boundary check: position 0 or preceded by a non-alphanumeric character
+      if (idx === 0 || !/[a-z0-9]/.test(lower[idx - 1])) {
+        if (idx < firstIdx) firstIdx = idx;
+        break;
+      }
+      start = idx + 1;
+    }
   }
   return firstIdx === Infinity ? model : model.slice(firstIdx);
 }
@@ -517,6 +554,30 @@ function gpt5BaseMatches(model, token) {
 }
 
 /**
+ * gpt-version-segment match: the token appears as an exact segment AND the next segment
+ * (the one immediately after the token) starts with a digit.
+ * This matches "gpt" in "gpt-5.5" (next seg "5") and "gpt" in "gpt-5-4-mini" (next seg "5")
+ * but NOT "gpt" in "gpt-neox-20b" (next seg "neox" starts with a letter).
+ * Also matches the dashless exact-segment alias (e.g. "gpt5") directly via segment equality.
+ */
+function gptVersionSegmentMatches(model, token) {
+  const lower = model.toLowerCase();
+  const tok = token.toLowerCase();
+  const segs = lower.split(/[^a-z0-9]+/);
+  for (let i = 0; i < segs.length; i++) {
+    if (segs[i] === tok) {
+      // Exact segment match (e.g. "gpt5" matches "gpt5-custom")
+      if (tok.length > 3 || /^\d/.test(tok)) return true;  // dashless numeric form like "gpt5"
+      // For "gpt": require the next segment to start with a digit
+      const nextSeg = segs[i + 1];
+      if (nextSeg !== undefined && /^\d/.test(nextSeg)) return true;
+      // No valid next segment — this "gpt" segment alone does not match
+    }
+  }
+  return false;
+}
+
+/**
  * Test if a family rule matches the given (normalized) model string for a provider.
  */
 function ruleMatchesModel(rule, normalizedModel, provider) {
@@ -540,6 +601,8 @@ function ruleMatchesModel(rule, normalizedModel, provider) {
       const segs = lower.split(/[^a-z0-9]+/);
       return allTokens.some((t) => segs.some((s) => s.startsWith(t.toLowerCase())));
     }
+    case "gpt-version-segment":
+      return allTokens.some((t) => gptVersionSegmentMatches(lower, t));
     default:
       throw new Error(`unknown match_kind: ${rule.match_kind}`);
   }
@@ -876,21 +939,45 @@ ${emitRustCapabilityResult(clean, "                ")}
 // ---------------------------------------------------------------------------
 
 /// Strip any catalog-naming prefix to get the normalized model alias for family matching.
-/// Finds the first occurrence of a known family token (claude-, gpt-) and returns from there.
+/// Finds the first boundary-aligned occurrence of a known family token and returns from there.
+/// Boundary-aligned: the token must start at position 0 or be preceded by a non-alphanumeric char.
+/// This prevents "customgpt-5-5-endpoint" from stripping to "gpt-5-5-endpoint" via "gpt-" inside
+/// the "customgpt-" prefix.
 ///
 /// Examples:
-///   "goose-claude-fable-5"      → "claude-fable-5"
-///   "databricks-gpt-5.5"        → "gpt-5.5"
-///   "team-x-claude-opus-4-7"    → "claude-opus-4-7"
-///   "claude-opus-4-7"           → "claude-opus-4-7"  (no prefix)
+///   "goose-claude-fable-5"      → "claude-fable-5"   (boundary: preceded by "-")
+///   "databricks-gpt-5.5"        → "gpt-5.5"           (boundary: preceded by "-")
+///   "team-x-claude-opus-4-7"    → "claude-opus-4-7"   (boundary: preceded by "-")
+///   "claude-opus-4-7"           → "claude-opus-4-7"   (no prefix, already boundary)
+///   "customgpt-5-5-ep"          → "customgpt-5-5-ep"  (no boundary match for "gpt-")
 ///   "llama-3"                   → "llama-3"           (no family token)
 pub fn strip_catalog_prefix(model: &str) -> &str {
     const FAMILY_TOKENS: &[&str] = &[${manifest.family_tokens.map((t) => `"${t}"`).join(", ")}];
     let lower = model.to_ascii_lowercase();
-    let first_idx = FAMILY_TOKENS
-        .iter()
-        .filter_map(|tok| lower.find(tok))
-        .min();
+    let mut first_idx: Option<usize> = None;
+    for tok in FAMILY_TOKENS {
+        let tok_bytes = tok.as_bytes();
+        let lower_bytes = lower.as_bytes();
+        let mut start = 0usize;
+        loop {
+            match lower_bytes[start..].windows(tok_bytes.len()).position(|w| w == tok_bytes) {
+                None => break,
+                Some(rel) => {
+                    let idx = start + rel;
+                    // Boundary check: position 0 or preceded by a non-alphanumeric byte
+                    let at_boundary = idx == 0 || {
+                        let prev = lower_bytes[idx - 1];
+                        !prev.is_ascii_alphanumeric()
+                    };
+                    if at_boundary {
+                        first_idx = Some(first_idx.map_or(idx, |f| f.min(idx)));
+                        break;
+                    }
+                    start = idx + 1;
+                }
+            }
+        }
+    }
     match first_idx {
         Some(idx) => &model[idx..],
         None => model,
@@ -1082,6 +1169,8 @@ function buildRustMatchExpr(rule, provider) {
         )
         .join(" || ");
     }
+    case "gpt-version-segment":
+      return allTokens.map((t) => `gpt_version_segment_matches_rs(lower, "${t.toLowerCase()}")`).join(" || ");
     default:
       throw new Error(`unknown match_kind: ${rule.match_kind}`);
   }
@@ -1157,8 +1246,7 @@ fn gpt5_base_matches_rs(model: &str, token: &str) -> bool {
                 let dash_rest = &suffix[1..];
                 // Reject -<1-3 digits> followed by non-alphanumeric or end (mirrors TS /^\\d{1,3}(?:[^a-z\\d]|$)/i).
                 let first_non_digit = dash_rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(dash_rest.len());
-                let is_short_version = first_non_digit >= 1
-                    && first_non_digit <= 3
+                let is_short_version = (1..=3).contains(&first_non_digit)
                     && (first_non_digit == dash_rest.len()
                         || !dash_rest.as_bytes()[first_non_digit].is_ascii_alphanumeric());
                 if is_short_version {
@@ -1169,6 +1257,32 @@ fn gpt5_base_matches_rs(model: &str, token: &str) -> bool {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// gpt-version-segment helper (used by generated family resolver)
+// ---------------------------------------------------------------------------
+
+/// gpt-version-segment match: token is an exact segment AND (token itself starts with a digit,
+/// OR the next segment after it starts with a digit). Prevents "gpt-neox-20b" from matching
+/// "gpt" because "neox" starts with a letter, while "gpt-5.5" matches because next seg "5" is digit.
+fn gpt_version_segment_matches_rs(model: &str, token: &str) -> bool {
+    let segs: Vec<&str> = model.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+    for (i, seg) in segs.iter().enumerate() {
+        if *seg == token {
+            // Dashless numeric form (e.g. "gpt5"): token length > 3 or starts with digit
+            if token.len() > 3 || token.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
+                return true;
+            }
+            // For short alpha tokens like "gpt": require the next segment to start with a digit
+            if let Some(next_seg) = segs.get(i + 1) {
+                if next_seg.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1286,6 +1400,8 @@ function buildTsMatchExpr(rule, provider) {
             `lower.split(/[^a-z0-9]+/).some(s => s.startsWith("${t.toLowerCase()}"))`,
         )
         .join(" || ");
+    case "gpt-version-segment":
+      return allTokens.map((t) => `gptVersionSegmentMatchesGenerated(lower, "${t.toLowerCase()}")`).join(" || ");
     default:
       throw new Error(`unknown match_kind: ${rule.match_kind}`);
   }
@@ -1298,10 +1414,10 @@ const tsProviderFallbacks = providerFallbackKeys
     const concClean = { ...fb.concrete_unknown, registry_label: null };
     delete blankClean._provenance;
     delete concClean._provenance;
-    return `  "${provider}": {
+    return `  ["${provider}", {
     blank: ${emitTsCapabilityResult(blankClean, "    ")},
     concreteUnknown: ${emitTsCapabilityResult(concClean, "    ")},
-  },`;
+  }],`;
   })
   .join("\n");
 
@@ -1411,6 +1527,25 @@ function gpt5BaseMatchesGenerated(m: string, token: string): boolean {
   }
 }
 
+/**
+ * gpt-version-segment match: token is an exact segment AND (token itself starts with a digit,
+ * OR the next segment after it starts with a digit). Prevents "gpt-neox-20b" from matching
+ * "gpt" because "neox" starts with a letter, while "gpt-5.5" matches because next seg "5" is digit.
+ */
+function gptVersionSegmentMatchesGenerated(m: string, token: string): boolean {
+  const segs = m.split(/[^a-z0-9]+/);
+  for (let i = 0; i < segs.length; i++) {
+    if (segs[i] === token) {
+      // Dashless numeric form (e.g. "gpt5") or token itself starts with digit
+      if (token.length > 3 || /^\\d/.test(token)) return true;
+      // For "gpt": require the next segment to start with a digit
+      const nextSeg = segs[i + 1];
+      if (nextSeg !== undefined && /^\\d/.test(nextSeg)) return true;
+    }
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Exact records — provider-qualified, pre-prefix-stripping
 // ---------------------------------------------------------------------------
@@ -1428,9 +1563,9 @@ ${tsExactEntries
 // Provider fallbacks
 // ---------------------------------------------------------------------------
 
-const PROVIDER_FALLBACKS: Record<string, { blank: CapabilityResult; concreteUnknown: CapabilityResult }> = {
+const PROVIDER_FALLBACKS = new Map<string, { blank: CapabilityResult; concreteUnknown: CapabilityResult }>([
 ${tsProviderFallbacks}
-};
+]);
 
 const DEFAULT_FALLBACK = {
   blank: ${emitTsCapabilityResult(defaultFbBlank, "  ")},
@@ -1438,15 +1573,25 @@ const DEFAULT_FALLBACK = {
 };
 
 // ---------------------------------------------------------------------------
-// Strip catalog prefix — finds first family token occurrence
+// Strip catalog prefix — boundary-aware, finds first boundary-aligned family token
 // ---------------------------------------------------------------------------
 
 export function stripCatalogPrefix(model: string): string {
   const FAMILY_TOKENS = [${manifest.family_tokens.map((t) => `"${t}"`).join(", ")}] as const;
+  const lower = model.toLowerCase();
   let firstIdx = Infinity;
   for (const tok of FAMILY_TOKENS) {
-    const idx = model.toLowerCase().indexOf(tok);
-    if (idx !== -1 && idx < firstIdx) firstIdx = idx;
+    let start = 0;
+    while (true) {
+      const idx = lower.indexOf(tok, start);
+      if (idx === -1) break;
+      // Boundary check: position 0 or preceded by a non-alphanumeric character
+      if (idx === 0 || !/[a-z0-9]/.test(lower[idx - 1])) {
+        if (idx < firstIdx) firstIdx = idx;
+        break;
+      }
+      start = idx + 1;
+    }
   }
   return firstIdx === Infinity ? model : model.slice(firstIdx);
 }
@@ -1492,7 +1637,7 @@ export function resolveModelCapabilities(
 
   // Step 3: provider fallback
   const isBlank = rawModelId.trim() === "";
-  const fb = PROVIDER_FALLBACKS[provider] ?? DEFAULT_FALLBACK;
+  const fb = PROVIDER_FALLBACKS.get(provider) ?? DEFAULT_FALLBACK;
   return isBlank ? { ...fb.blank, registryLabel: null } : { ...fb.concreteUnknown, registryLabel: null };
 }
 `;

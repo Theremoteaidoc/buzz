@@ -122,6 +122,25 @@ function gpt5BaseMatchesGenerated(m: string, token: string): boolean {
   }
 }
 
+/**
+ * gpt-version-segment match: token is an exact segment AND (token itself starts with a digit,
+ * OR the next segment after it starts with a digit). Prevents "gpt-neox-20b" from matching
+ * "gpt" because "neox" starts with a letter, while "gpt-5.5" matches because next seg "5" is digit.
+ */
+function gptVersionSegmentMatchesGenerated(m: string, token: string): boolean {
+  const segs = m.split(/[^a-z0-9]+/);
+  for (let i = 0; i < segs.length; i++) {
+    if (segs[i] === token) {
+      // Dashless numeric form (e.g. "gpt5") or token itself starts with digit
+      if (token.length > 3 || /^\d/.test(token)) return true;
+      // For "gpt": require the next segment to start with a digit
+      const nextSeg = segs[i + 1];
+      if (nextSeg !== undefined && /^\d/.test(nextSeg)) return true;
+    }
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Exact records — provider-qualified, pre-prefix-stripping
 // ---------------------------------------------------------------------------
@@ -189,8 +208,8 @@ const EXACT_RECORDS = new Map<string, CapabilityResult>([
 // Provider fallbacks
 // ---------------------------------------------------------------------------
 
-const PROVIDER_FALLBACKS: Record<string, { blank: CapabilityResult; concreteUnknown: CapabilityResult }> = {
-  "anthropic": {
+const PROVIDER_FALLBACKS = new Map<string, { blank: CapabilityResult; concreteUnknown: CapabilityResult }>([
+  ["anthropic", {
     blank: {
           registryLabel: null,
           thinkingMode: "adaptive",
@@ -207,8 +226,8 @@ const PROVIDER_FALLBACKS: Record<string, { blank: CapabilityResult; concreteUnkn
           databricksV2WireRoute: "not-applicable",
           normalizationPolicy: "none",
         },
-  },
-  "openai": {
+  }],
+  ["openai", {
     blank: {
           registryLabel: null,
           thinkingMode: "none",
@@ -225,8 +244,8 @@ const PROVIDER_FALLBACKS: Record<string, { blank: CapabilityResult; concreteUnkn
           databricksV2WireRoute: "not-applicable",
           normalizationPolicy: "openai-clamp-max-to-xhigh",
         },
-  },
-  "databricks_v2": {
+  }],
+  ["databricks_v2", {
     blank: {
           registryLabel: null,
           thinkingMode: "none",
@@ -243,8 +262,8 @@ const PROVIDER_FALLBACKS: Record<string, { blank: CapabilityResult; concreteUnkn
           databricksV2WireRoute: "mlflow-chat",
           normalizationPolicy: "openai-clamp-max-to-xhigh",
         },
-  },
-  "databricks": {
+  }],
+  ["databricks", {
     blank: {
           registryLabel: null,
           thinkingMode: "none",
@@ -261,8 +280,8 @@ const PROVIDER_FALLBACKS: Record<string, { blank: CapabilityResult; concreteUnkn
           databricksV2WireRoute: "not-applicable",
           normalizationPolicy: "openai-clamp-max-to-xhigh",
         },
-  },
-  "openrouter": {
+  }],
+  ["openrouter", {
     blank: {
           registryLabel: null,
           thinkingMode: "none",
@@ -279,8 +298,8 @@ const PROVIDER_FALLBACKS: Record<string, { blank: CapabilityResult; concreteUnkn
           databricksV2WireRoute: "not-applicable",
           normalizationPolicy: "none",
         },
-  },
-};
+  }],
+]);
 
 const DEFAULT_FALLBACK = {
   blank: {
@@ -302,15 +321,25 @@ const DEFAULT_FALLBACK = {
 };
 
 // ---------------------------------------------------------------------------
-// Strip catalog prefix — finds first family token occurrence
+// Strip catalog prefix — boundary-aware, finds first boundary-aligned family token
 // ---------------------------------------------------------------------------
 
 export function stripCatalogPrefix(model: string): string {
   const FAMILY_TOKENS = ["claude-", "gpt-"] as const;
+  const lower = model.toLowerCase();
   let firstIdx = Infinity;
   for (const tok of FAMILY_TOKENS) {
-    const idx = model.toLowerCase().indexOf(tok);
-    if (idx !== -1 && idx < firstIdx) firstIdx = idx;
+    let start = 0;
+    while (true) {
+      const idx = lower.indexOf(tok, start);
+      if (idx === -1) break;
+      // Boundary check: position 0 or preceded by a non-alphanumeric character
+      if (idx === 0 || !/[a-z0-9]/.test(lower[idx - 1])) {
+        if (idx < firstIdx) firstIdx = idx;
+        break;
+      }
+      start = idx + 1;
+    }
   }
   return firstIdx === Infinity ? model : model.slice(firstIdx);
 }
@@ -762,7 +791,7 @@ function lookupByFamilyRules(provider: string, normalized: string): CapabilityRe
         };
   }
   // rule: dbv2-gpt-code-names-segment, provider: databricks_v2, priority: 6
-  if (provider === "databricks_v2" && (lower.split(/[^a-z0-9]+/).includes("gpt") || lower.split(/[^a-z0-9]+/).includes("gpt5"))) {
+  if (provider === "databricks_v2" && (gptVersionSegmentMatchesGenerated(lower, "gpt") || gptVersionSegmentMatchesGenerated(lower, "gpt5"))) {
     return {
           registryLabel: null,
           thinkingMode: "none",
@@ -828,6 +857,6 @@ export function resolveModelCapabilities(
 
   // Step 3: provider fallback
   const isBlank = rawModelId.trim() === "";
-  const fb = PROVIDER_FALLBACKS[provider] ?? DEFAULT_FALLBACK;
+  const fb = PROVIDER_FALLBACKS.get(provider) ?? DEFAULT_FALLBACK;
   return isBlank ? { ...fb.blank, registryLabel: null } : { ...fb.concreteUnknown, registryLabel: null };
 }

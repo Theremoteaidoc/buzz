@@ -258,18 +258,48 @@ pub fn lookup_exact(provider: &str, raw_model_id: &str) -> Option<CapabilityResu
 // ---------------------------------------------------------------------------
 
 /// Strip any catalog-naming prefix to get the normalized model alias for family matching.
-/// Finds the first occurrence of a known family token (claude-, gpt-) and returns from there.
+/// Finds the first boundary-aligned occurrence of a known family token and returns from there.
+/// Boundary-aligned: the token must start at position 0 or be preceded by a non-alphanumeric char.
+/// This prevents "customgpt-5-5-endpoint" from stripping to "gpt-5-5-endpoint" via "gpt-" inside
+/// the "customgpt-" prefix.
 ///
 /// Examples:
-///   "goose-claude-fable-5"      → "claude-fable-5"
-///   "databricks-gpt-5.5"        → "gpt-5.5"
-///   "team-x-claude-opus-4-7"    → "claude-opus-4-7"
-///   "claude-opus-4-7"           → "claude-opus-4-7"  (no prefix)
+///   "goose-claude-fable-5"      → "claude-fable-5"   (boundary: preceded by "-")
+///   "databricks-gpt-5.5"        → "gpt-5.5"           (boundary: preceded by "-")
+///   "team-x-claude-opus-4-7"    → "claude-opus-4-7"   (boundary: preceded by "-")
+///   "claude-opus-4-7"           → "claude-opus-4-7"   (no prefix, already boundary)
+///   "customgpt-5-5-ep"          → "customgpt-5-5-ep"  (no boundary match for "gpt-")
 ///   "llama-3"                   → "llama-3"           (no family token)
 pub fn strip_catalog_prefix(model: &str) -> &str {
     const FAMILY_TOKENS: &[&str] = &["claude-", "gpt-"];
     let lower = model.to_ascii_lowercase();
-    let first_idx = FAMILY_TOKENS.iter().filter_map(|tok| lower.find(tok)).min();
+    let mut first_idx: Option<usize> = None;
+    for tok in FAMILY_TOKENS {
+        let tok_bytes = tok.as_bytes();
+        let lower_bytes = lower.as_bytes();
+        let mut start = 0usize;
+        loop {
+            match lower_bytes[start..]
+                .windows(tok_bytes.len())
+                .position(|w| w == tok_bytes)
+            {
+                None => break,
+                Some(rel) => {
+                    let idx = start + rel;
+                    // Boundary check: position 0 or preceded by a non-alphanumeric byte
+                    let at_boundary = idx == 0 || {
+                        let prev = lower_bytes[idx - 1];
+                        !prev.is_ascii_alphanumeric()
+                    };
+                    if at_boundary {
+                        first_idx = Some(first_idx.map_or(idx, |f| f.min(idx)));
+                        break;
+                    }
+                    start = idx + 1;
+                }
+            }
+        }
+    }
     match first_idx {
         Some(idx) => &model[idx..],
         None => model,
@@ -1004,12 +1034,8 @@ pub fn lookup_by_family_rules(provider: &str, normalized: &str) -> Option<Capabi
     }
     // rule: dbv2-gpt-code-names-segment, provider: databricks_v2, priority: 6
     if provider == "databricks_v2"
-        && (lower
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .any(|s| s == "gpt")
-            || lower
-                .split(|c: char| !c.is_ascii_alphanumeric())
-                .any(|s| s == "gpt5"))
+        && (gpt_version_segment_matches_rs(lower, "gpt")
+            || gpt_version_segment_matches_rs(lower, "gpt5"))
     {
         return Some(CapabilityResult {
             registry_label: None,
@@ -1448,8 +1474,7 @@ fn gpt5_base_matches_rs(model: &str, token: &str) -> bool {
                 let first_non_digit = dash_rest
                     .find(|c: char| !c.is_ascii_digit())
                     .unwrap_or(dash_rest.len());
-                let is_short_version = first_non_digit >= 1
-                    && first_non_digit <= 3
+                let is_short_version = (1..=3).contains(&first_non_digit)
                     && (first_non_digit == dash_rest.len()
                         || !dash_rest.as_bytes()[first_non_digit].is_ascii_alphanumeric());
                 if is_short_version {
@@ -1460,6 +1485,36 @@ fn gpt5_base_matches_rs(model: &str, token: &str) -> bool {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// gpt-version-segment helper (used by generated family resolver)
+// ---------------------------------------------------------------------------
+
+/// gpt-version-segment match: token is an exact segment AND (token itself starts with a digit,
+/// OR the next segment after it starts with a digit). Prevents "gpt-neox-20b" from matching
+/// "gpt" because "neox" starts with a letter, while "gpt-5.5" matches because next seg "5" is digit.
+fn gpt_version_segment_matches_rs(model: &str, token: &str) -> bool {
+    let segs: Vec<&str> = model.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+    for (i, seg) in segs.iter().enumerate() {
+        if *seg == token {
+            // Dashless numeric form (e.g. "gpt5"): token length > 3 or starts with digit
+            if token.len() > 3 || token.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
+                return true;
+            }
+            // For short alpha tokens like "gpt": require the next segment to start with a digit
+            if let Some(next_seg) = segs.get(i + 1) {
+                if next_seg
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_digit())
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------

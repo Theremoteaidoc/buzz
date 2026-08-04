@@ -40,14 +40,16 @@ mod shared_corpus_tests {
         expect: Option<CorpusExpect>,
     }
 
+    /// All six axes are required on every corpus vector.
+    /// A missing axis is a schema error that hard-fails the test.
     #[derive(Deserialize)]
     struct CorpusExpect {
-        thinking_mode: Option<String>,
-        supported_efforts: Option<Vec<String>>,
-        default_effort: Option<serde_json::Value>, // string or null
-        databricks_v2_wire_route: Option<String>,
-        normalization_policy: Option<String>,
-        registry_label: Option<serde_json::Value>, // string or null
+        thinking_mode: String,
+        supported_efforts: Vec<String>,
+        default_effort: serde_json::Value, // string or null
+        databricks_v2_wire_route: String,
+        normalization_policy: String,
+        registry_label: serde_json::Value, // string or null
     }
 
     // ---------------------------------------------------------------------------
@@ -162,9 +164,10 @@ mod shared_corpus_tests {
             let result = resolve_model_capabilities(canonical_provider, raw_model_id);
             ran += 1;
 
-            // Check thinking_mode if present in expect
-            if let Some(expected_mode) = &expect.thinking_mode {
-                let expected = parse_thinking_mode(expected_mode);
+            // All six axes are required — no optional field checks.
+            // thinking_mode
+            {
+                let expected = parse_thinking_mode(&expect.thinking_mode);
                 if result.thinking_mode != expected {
                     failures.push(format!(
                         "[{id}] thinking_mode: got {:?}, expected {:?}",
@@ -173,10 +176,13 @@ mod shared_corpus_tests {
                 }
             }
 
-            // Check supported_efforts if present
-            if let Some(expected_efforts) = &expect.supported_efforts {
-                let expected: Vec<ThinkingEffort> =
-                    expected_efforts.iter().map(|s| parse_effort(s)).collect();
+            // supported_efforts
+            {
+                let expected: Vec<ThinkingEffort> = expect
+                    .supported_efforts
+                    .iter()
+                    .map(|s| parse_effort(s))
+                    .collect();
                 let actual: Vec<ThinkingEffort> =
                     result.supported_efforts.iter().cloned().collect();
                 if actual != expected {
@@ -186,9 +192,9 @@ mod shared_corpus_tests {
                 }
             }
 
-            // Check default_effort if present
-            if let Some(expected_de) = &expect.default_effort {
-                let expected_parsed = match expected_de {
+            // default_effort (string or null)
+            {
+                let expected_parsed: Option<ThinkingEffort> = match &expect.default_effort {
                     serde_json::Value::Null => None,
                     serde_json::Value::String(s) => Some(parse_effort(s)),
                     other => {
@@ -203,9 +209,9 @@ mod shared_corpus_tests {
                 }
             }
 
-            // Check databricks_v2_wire_route if present
-            if let Some(expected_route) = &expect.databricks_v2_wire_route {
-                let expected = parse_route(expected_route);
+            // databricks_v2_wire_route
+            {
+                let expected = parse_route(&expect.databricks_v2_wire_route);
                 if result.databricks_v2_wire_route != expected {
                     failures.push(format!(
                         "[{id}] databricks_v2_wire_route: got {:?}, expected {:?}",
@@ -214,9 +220,9 @@ mod shared_corpus_tests {
                 }
             }
 
-            // Check normalization_policy if present
-            if let Some(expected_policy) = &expect.normalization_policy {
-                let expected = parse_normalization_policy(expected_policy);
+            // normalization_policy
+            {
+                let expected = parse_normalization_policy(&expect.normalization_policy);
                 if result.normalization_policy != expected {
                     failures.push(format!(
                         "[{id}] normalization_policy: got {:?}, expected {:?}",
@@ -225,14 +231,14 @@ mod shared_corpus_tests {
                 }
             }
 
-            // Check registry_label if present (JSON string or null)
-            if let Some(expected_rl) = &expect.registry_label {
-                let expected_opt: Option<&str> = match expected_rl {
+            // registry_label (string or null)
+            {
+                let expected_opt: Option<&str> = match &expect.registry_label {
                     serde_json::Value::Null => None,
                     serde_json::Value::String(s) => Some(s.as_str()),
-                    other => panic!(
-                        "unexpected registry_label value in corpus vector {id}: {other:?}"
-                    ),
+                    other => {
+                        panic!("unexpected registry_label value in corpus vector {id}: {other:?}")
+                    }
                 };
                 if result.registry_label != expected_opt {
                     failures.push(format!(
@@ -241,7 +247,6 @@ mod shared_corpus_tests {
                     ));
                 }
             }
-
         }
 
         if !failures.is_empty() {

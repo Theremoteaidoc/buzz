@@ -48,10 +48,28 @@ function canonicalizeProvider(provider) {
 let passed = 0;
 let failed = 0;
 
+const REQUIRED_AXES = [
+  "thinking_mode",
+  "supported_efforts",
+  "default_effort",
+  "databricks_v2_wire_route",
+  "normalization_policy",
+  "registry_label",
+];
+
 for (const entry of corpus) {
   // Skip group header entries
   if (entry._group) continue;
   if (!entry.expect) continue;
+
+  // Require all 6 axes on every executable vector — sparse vectors hide divergences.
+  const missingAxes = REQUIRED_AXES.filter((ax) => !(ax in entry.expect));
+  if (missingAxes.length > 0) {
+    failed++;
+    console.error(`  FAIL  ${entry.id}: sparse vector — missing axes: ${missingAxes.join(", ")}`);
+    console.error(`         All six axes are required: ${REQUIRED_AXES.join(", ")}`);
+    continue;
+  }
 
   // resolveModelCapabilities returns camelCase keys (registryLabel, thinkingMode, etc.)
   const result = resolveModelCapabilities(canonicalizeProvider(entry.provider), entry.raw_model_id);

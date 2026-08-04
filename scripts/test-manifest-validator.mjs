@@ -538,4 +538,129 @@ test("schema-negative: exact_record invalid normalization_policy is rejected", (
   );
 });
 
+// ---------------------------------------------------------------------------
+// Rule: family_rule match_priority must be a non-negative integer
+// ---------------------------------------------------------------------------
+test("schema-negative: family_rule match_priority string (injection vector) is rejected", () => {
+  assertRejects(
+    "family_rule string match_priority",
+    mutate((m) => {
+      // Inject a string that contains a compile_error! macro — must be rejected before emission
+      m.family_rules[0].match_priority = 'compile_error!("THUFIR_INJECTED")';
+    }),
+    "match_priority",
+  );
+});
+
+test("schema-negative: family_rule match_priority negative integer is rejected", () => {
+  assertRejects(
+    "family_rule negative match_priority",
+    mutate((m) => {
+      m.family_rules[0].match_priority = -1;
+    }),
+    "match_priority",
+  );
+});
+
+test("schema-negative: family_rule match_priority float is rejected", () => {
+  assertRejects(
+    "family_rule float match_priority",
+    mutate((m) => {
+      m.family_rules[0].match_priority = 1.5;
+    }),
+    "match_priority",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: exact_record uppercase duplicate key is rejected (after lowercasing)
+// ---------------------------------------------------------------------------
+test("schema-negative: exact_record uppercase duplicate key is rejected", () => {
+  assertRejects(
+    "exact_record uppercase duplicate key",
+    mutate((m) => {
+      // Add an uppercase copy of an existing exact record key
+      const existing = m.exact_records[0];
+      m.exact_records.push({
+        ...existing,
+        provider: existing.provider.toUpperCase(),
+        raw_model_id: existing.raw_model_id.toUpperCase(),
+      });
+    }),
+    "duplicate exact_record key",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: exact_record inherited default_effort not in inherited supported_efforts
+// ---------------------------------------------------------------------------
+test("schema-negative: exact_record inherited default_effort outside materialized supported_efforts is rejected", () => {
+  assertRejects(
+    "exact_record inherited default out of materialized efforts",
+    mutate((m) => {
+      // Override supported_efforts_override to a single value that excludes the family default.
+      // For any exact record that inherits family default_effort, override efforts to exclude it.
+      const rec = m.exact_records.find((r) => r.raw_model_id === "databricks-gpt-5-4-mini");
+      // Family default for the gpt5-4 rule is "none". Override to only ["low"] to force mismatch.
+      rec.supported_efforts_override = ["low"];
+      // No explicit default_effort — inherits "none" from family, but "none" is not in ["low"]
+    }),
+    "materialized default_effort",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: family_rule supported_efforts must have no duplicates
+// ---------------------------------------------------------------------------
+test("schema-negative: family_rule supported_efforts with duplicate is rejected", () => {
+  assertRejects(
+    "family_rule duplicate effort",
+    mutate((m) => {
+      m.family_rules[0].supported_efforts = ["low", "low", "medium"];
+    }),
+    "duplicate effort",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: family_rule supported_efforts must follow canonical order
+// ---------------------------------------------------------------------------
+test("schema-negative: family_rule supported_efforts out of canonical order is rejected", () => {
+  assertRejects(
+    "family_rule efforts out of order",
+    mutate((m) => {
+      m.family_rules[0].supported_efforts = ["high", "low", "medium"];
+    }),
+    "canonical order",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: provider_fallback supported_efforts must have no duplicates
+// ---------------------------------------------------------------------------
+test("schema-negative: provider_fallback supported_efforts with duplicate is rejected", () => {
+  assertRejects(
+    "provider_fallback duplicate effort",
+    mutate((m) => {
+      const provider = Object.keys(m.provider_fallbacks)[0];
+      m.provider_fallbacks[provider].blank.supported_efforts = ["low", "low", "medium"];
+    }),
+    "duplicate effort",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: provider_fallback supported_efforts must follow canonical order
+// ---------------------------------------------------------------------------
+test("schema-negative: provider_fallback supported_efforts out of canonical order is rejected", () => {
+  assertRejects(
+    "provider_fallback efforts out of order",
+    mutate((m) => {
+      const provider = Object.keys(m.provider_fallbacks)[0];
+      m.provider_fallbacks[provider].blank.supported_efforts = ["high", "low", "medium"];
+    }),
+    "canonical order",
+  );
+});
+
 console.log("\nSchema-negative validator tests complete.");
