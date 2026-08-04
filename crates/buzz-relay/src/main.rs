@@ -1228,9 +1228,15 @@ async fn serve(
             std::process::exit(1);
         });
         let hard_shutdown_abort = hard_shutdown.abort_handle();
-        // Stop accepting first, then retain ownership of every delayed close
-        // until its 1012 frame has been queued and its send loop cancelled.
-        let closed = drain_conn_manager.drain_all(drain_jitter_ms).await;
+        // Stop accepting first, then close every live socket. Jitter off (the
+        // default) uses the original synchronous all-at-once drain; jitter on
+        // retains ownership of every delayed close until its 1012 frame has
+        // been flushed and acknowledged (or its send loop cancelled).
+        let closed = if drain_jitter_ms == 0 {
+            drain_conn_manager.drain_all()
+        } else {
+            drain_conn_manager.drain_all_jittered(drain_jitter_ms).await
+        };
         info!(
             connections = closed,
             jitter_ms = drain_jitter_ms,

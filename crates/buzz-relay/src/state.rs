@@ -219,7 +219,6 @@ impl ConnectionManager {
         subscriptions: ConnectionSubscriptions,
         grace_limit: u8,
     ) {
-        let drain_restart_tx = restart_tx.clone();
         let drain_ctrl_tx = ctrl_tx.clone();
         let drain_cancel = cancel.clone();
         self.connections.insert(
@@ -239,17 +238,14 @@ impl ConnectionManager {
         // Insert-then-check pairs with drain_all's store-then-iterate: either
         // the drain iteration sees this entry, or this check sees the flag.
         // A registration that raced past the snapshot self-signals here, so
-        // no connection can outlive graceful shutdown unclosed.
+        // no connection can outlive graceful shutdown unclosed. A client that
+        // arrives mid-shutdown should be closed at once, so the self-signal
+        // always uses the immediate control-frame + cancel path regardless of
+        // whether jittered drain is enabled — jitter smears the sockets that
+        // were already established, not late arrivals.
         if self.draining.load(Ordering::SeqCst) {
-            if let Some(restart_tx) = drain_restart_tx {
-                let (flushed, _acknowledgement) = tokio::sync::oneshot::channel();
-                if restart_tx.try_send(RestartClose { flushed }).is_err() {
-                    drain_cancel.cancel();
-                }
-            } else {
-                let _ = drain_ctrl_tx.try_send(Self::restart_close_frame());
-                drain_cancel.cancel();
-            }
+            let _ = drain_ctrl_tx.try_send(Self::restart_close_frame());
+            drain_cancel.cancel();
         }
     }
 
@@ -348,8 +344,51 @@ impl ConnectionManager {
         closed
     }
 
+    /// Closes every live connection with a `1012 Service Restart` close frame.
+    ///
+    /// This is the original, all-at-once drain, retained as the default path
+    /// (`BUZZ_DRAIN_JITTER_MS` unset or `0`). It is synchronous and returns as
+    /// soon as every close is queued and every connection cancelled, so the
+    /// caller's hard-drain timeout backstops delivery unchanged.
+    ///
+    /// Called when graceful shutdown starts draining. Without this, upgraded
+    /// WebSocket connections outlive the axum listener drain: clients ride the
+    /// dying pod until the forced exit and then learn about the restart from a
+    /// TCP reset (or, on an abrupt kill, from up to 60s of stall-watchdog
+    /// silence). The explicit close frame tells them to reconnect immediately
+    /// — and that the disconnect is a restart, not a policy action.
+    ///
+    /// Uses the "queue frame on ctrl, then cancel" idiom (see
+    /// [`ConnectionManager::disconnect_pubkey`]): the send loop drains queued
+    /// control frames — including this close — before its cancel branch closes
+    /// the socket. Best-effort: a full control buffer still gets the close via
+    /// cancel, just without the restart code.
+    ///
+    /// Returns the number of connections signalled.
+    pub fn drain_all(&self) -> usize {
+        // Store-then-iterate pairs with register's insert-then-check: a
+        // registration that misses this iteration observes the flag and
+        // self-signals instead. The flag is sticky — drain is one-way.
+        self.draining.store(true, Ordering::SeqCst);
+        let frame = Self::restart_close_frame();
+        let mut closed = 0usize;
+        for entry in self.connections.iter() {
+            let _ = entry.ctrl_tx.try_send(frame.clone());
+            entry.cancel.cancel();
+            closed += 1;
+        }
+        closed
+    }
+
     /// Closes every live connection with a `1012 Service Restart` frame,
-    /// spreading closes across `[1, jitter_ms]` when jitter is enabled.
+    /// spreading closes across `[1, jitter_ms]`.
+    ///
+    /// This is the jittered drain, used only when `BUZZ_DRAIN_JITTER_MS > 0`.
+    /// It is kept deliberately separate from [`Self::drain_all`] so that the
+    /// default (jitter-off) shutdown path is byte-for-byte the previously
+    /// shipped behavior; the new close-acknowledgement machinery only runs when
+    /// jitter is explicitly enabled. Once the jittered path is proven in
+    /// production for all cases, the two can be unified and the old one dropped.
     ///
     /// A pod under a rolling deploy can hold thousands of WebSocket sessions.
     /// Closing them simultaneously ([`Self::drain_all`]) makes every client
@@ -359,6 +398,12 @@ impl ConnectionManager {
     /// smears the reconnects across the window while keeping the well-attributed
     /// 1012 close.
     ///
+    /// Each delayed close is delivered over the connection's dedicated
+    /// [`RestartClose`] channel: the writer flushes the 1012 frame and
+    /// acknowledges the flush, so drain waits for confirmed delivery (up to
+    /// [`RESTART_CLOSE_ACK_TIMEOUT`]) rather than assuming it. If the channel is
+    /// full/closed or the ack times out, drain falls back to cancellation.
+    ///
     /// The sticky drain flag is set before the first await, preserving
     /// [`Self::drain_all`]'s shutdown-boundary race guarantee: a registration
     /// that lands after the snapshot self-signals immediately (no jitter — a
@@ -366,15 +411,13 @@ impl ConnectionManager {
     /// future owns every delayed close, so the caller must await it before the
     /// relay runtime is allowed to stop.
     ///
-    /// `jitter_ms == 0` queues and cancels every captured connection before the
-    /// first await, preserving the previous all-at-once behavior.
-    ///
     /// Returns the number of connections signalled.
-    pub async fn drain_all(&self, jitter_ms: u64) -> usize {
+    pub async fn drain_all_jittered(&self, jitter_ms: u64) -> usize {
         // Store-then-snapshot pairs with register's insert-then-check: either
         // the snapshot captures a registration, or it observes the sticky flag
         // and self-signals immediately.
         self.draining.store(true, Ordering::SeqCst);
+        let jitter_ms = jitter_ms.max(1);
         let pending: Vec<_> = self
             .connections
             .iter()
@@ -382,15 +425,9 @@ impl ConnectionManager {
                 let ctrl_tx = entry.ctrl_tx.clone();
                 let restart_tx = entry.restart_tx.clone();
                 let cancel = entry.cancel.clone();
-                let delay_ms = if jitter_ms == 0 {
-                    0
-                } else {
-                    1 + rand::random::<u64>() % jitter_ms
-                };
+                let delay_ms = 1 + rand::random::<u64>() % jitter_ms;
                 async move {
-                    if delay_ms > 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     let Some(restart_tx) = restart_tx else {
                         // Unit-only registrations do not own a writer task.
                         let _ = ctrl_tx.try_send(Self::restart_close_frame());
@@ -1855,7 +1892,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_all_waits_for_writer_acknowledgement_without_cancelling() {
+    async fn drain_all_jittered_waits_for_writer_acknowledgement_without_cancelling() {
         let mgr = Arc::new(ConnectionManager::new());
         let conn_id = Uuid::new_v4();
         let (tx, _rx) = mpsc::channel(8);
@@ -1875,7 +1912,7 @@ mod tests {
         );
 
         let drain_mgr = Arc::clone(&mgr);
-        let drain = tokio::spawn(async move { drain_mgr.drain_all(0).await });
+        let drain = tokio::spawn(async move { drain_mgr.drain_all_jittered(1).await });
         let restart = restart_rx.recv().await.expect("restart command delivered");
         assert!(!drain.is_finished(), "drain waits for the writer flush");
         restart.flushed.send(true).expect("acknowledge flush");
@@ -1888,7 +1925,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_all_cancels_when_restart_channel_is_full_or_closed() {
+    async fn drain_all_jittered_cancels_when_restart_channel_is_full_or_closed() {
         for keep_receiver in [true, false] {
             let mgr = ConnectionManager::new();
             let conn_id = Uuid::new_v4();
@@ -1918,12 +1955,51 @@ mod tests {
                 3,
             );
 
-            assert_eq!(mgr.drain_all(0).await, 1);
+            assert_eq!(mgr.drain_all_jittered(1).await, 1);
             assert!(
                 cancel.is_cancelled(),
                 "unavailable writer cancels as fallback"
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_all_jittered_cancels_when_flush_ack_times_out() {
+        // A writer that accepts the restart command but never acknowledges the
+        // flush (e.g. wedged mid-send) must not stall the drain: after
+        // RESTART_CLOSE_ACK_TIMEOUT the connection falls back to cancellation.
+        let mgr = Arc::new(ConnectionManager::new());
+        let conn_id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(8);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let (restart_tx, mut restart_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        mgr.register(
+            conn_id,
+            tx,
+            ctrl_tx,
+            Some(restart_tx),
+            cancel.clone(),
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+
+        let drain_mgr = Arc::clone(&mgr);
+        let drain = tokio::spawn(async move { drain_mgr.drain_all_jittered(1).await });
+        // Take the restart command but hold the ack sender forever.
+        let restart = restart_rx.recv().await.expect("restart command delivered");
+        assert!(!drain.is_finished(), "drain waits on the ack timeout");
+        // Advance past the 5s ack timeout under paused time.
+        tokio::time::sleep(RESTART_CLOSE_ACK_TIMEOUT + std::time::Duration::from_millis(1)).await;
+
+        assert_eq!(drain.await.expect("drain task"), 1);
+        assert!(
+            cancel.is_cancelled(),
+            "an un-acknowledged flush falls back to cancellation"
+        );
+        drop(restart);
     }
 
     #[tokio::test]
@@ -1959,7 +2035,7 @@ mod tests {
             Uuid::from_u128(0xb),
         ));
 
-        let closed = mgr.drain_all(0).await;
+        let closed = mgr.drain_all();
 
         assert_eq!(closed, 2, "every connection is signalled, no tenant fence");
         assert!(cancel_a.is_cancelled(), "community-A session is cancelled");
@@ -2006,7 +2082,7 @@ mod tests {
             .try_send(WsMessage::Text("wedge".into()))
             .expect("fill control channel");
 
-        let closed = mgr.drain_all(0).await;
+        let closed = mgr.drain_all();
 
         assert_eq!(closed, 1);
         assert!(
@@ -2031,7 +2107,7 @@ mod tests {
         let mgr = ConnectionManager::new();
 
         // Drain with zero connections — sets the sticky flag.
-        assert_eq!(mgr.drain_all(0).await, 0);
+        assert_eq!(mgr.drain_all(), 0);
 
         // Late registration lands after the snapshot.
         let conn_id = Uuid::new_v4();
@@ -2068,9 +2144,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_all_zero_is_immediate() {
-        // jitter_ms == 0 preserves the original all-at-once behavior: the
-        // frame is queued and cancellation fires when the future resolves.
+    async fn drain_all_is_immediate() {
+        // The default (jitter-off) drain queues the frame and cancels
+        // synchronously — the frame is present the moment drain_all() returns.
         let mgr = Arc::new(ConnectionManager::new());
         let conn_id = Uuid::new_v4();
         let (tx, _rx) = mpsc::channel(8);
@@ -2088,10 +2164,10 @@ mod tests {
             3,
         );
 
-        let closed = mgr.drain_all(0).await;
+        let closed = mgr.drain_all();
 
         assert_eq!(closed, 1);
-        assert!(cancel.is_cancelled(), "zero jitter cancels synchronously");
+        assert!(cancel.is_cancelled(), "default drain cancels synchronously");
         assert!(
             matches!(
                 ctrl_rx
@@ -2099,12 +2175,12 @@ mod tests {
                     .expect("close frame delivered synchronously"),
                 WsMessage::Close(Some(_))
             ),
-            "the restart close is queued before drain_all(0) returns"
+            "the restart close is queued before drain_all() returns"
         );
     }
 
     #[tokio::test(start_paused = true)]
-    async fn drain_all_defers_close_until_within_jitter_window() {
+    async fn drain_all_jittered_defers_close_until_within_jitter_window() {
         // With jitter, the close is deferred within the owned drain future.
         // The sticky drain flag is still set immediately, so a late
         // registration self-signals with no delay.
@@ -2128,7 +2204,7 @@ mod tests {
         let jitter_ms = 20_000u64;
         // Poll the owned drain through its first await. Dropping this future
         // would drop the timers too; the shutdown path must retain and await it.
-        let drain = mgr.drain_all(jitter_ms);
+        let drain = mgr.drain_all_jittered(jitter_ms);
         tokio::pin!(drain);
         assert!(
             futures_util::poll!(&mut drain).is_pending(),
