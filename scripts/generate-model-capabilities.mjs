@@ -1567,7 +1567,7 @@ const PROVIDER_FALLBACKS = new Map<string, { blank: CapabilityResult; concreteUn
 ${tsProviderFallbacks}
 ]);
 
-const DEFAULT_FALLBACK = {
+const DEFAULT_FALLBACK: { blank: CapabilityResult; concreteUnknown: CapabilityResult } = {
   blank: ${emitTsCapabilityResult(defaultFbBlank, "  ")},
   concreteUnknown: ${emitTsCapabilityResult(defaultFbConc, "  ")},
 };
