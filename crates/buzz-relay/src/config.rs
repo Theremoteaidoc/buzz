@@ -473,8 +473,11 @@ impl Config {
 
         // Drain jitter: 0 = off (default). Clamp oversized values so every
         // delayed close is initiated with ten seconds left in the relay's
-        // hard-drain budget.
+        // hard-drain budget. An empty/whitespace-only value is treated as unset
+        // (jitter off), matching the sibling vars in this file — so setting the
+        // var to "" is a valid kill switch, not a crashloop.
         let drain_jitter_ms = match std::env::var("BUZZ_DRAIN_JITTER_MS") {
+            Ok(raw) if raw.trim().is_empty() => 0,
             Ok(raw) => raw
                 .trim()
                 .parse::<u64>()
@@ -1322,6 +1325,16 @@ mod tests {
         std::env::set_var("BUZZ_DRAIN_JITTER_MS", "soon");
         let junk = Config::from_env();
 
+        std::env::set_var("BUZZ_DRAIN_JITTER_MS", "");
+        let empty = Config::from_env()
+            .expect("empty is a valid kill switch")
+            .drain_jitter_ms;
+
+        std::env::set_var("BUZZ_DRAIN_JITTER_MS", "   ");
+        let blank = Config::from_env()
+            .expect("whitespace-only is a valid kill switch")
+            .drain_jitter_ms;
+
         if let Some(value) = previous {
             std::env::set_var("BUZZ_DRAIN_JITTER_MS", value);
         } else {
@@ -1339,6 +1352,11 @@ mod tests {
             junk.is_err(),
             "an unparsable jitter must fail loudly, not silently disable"
         );
+        assert_eq!(
+            empty, 0,
+            "an empty value is treated as unset — a kill switch, not a crashloop"
+        );
+        assert_eq!(blank, 0, "a whitespace-only value is treated as unset");
     }
 
     #[test]
