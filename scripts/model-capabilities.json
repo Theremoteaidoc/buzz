@@ -470,7 +470,6 @@
       "normalization_policy": "openai-clamp-max-to-xhigh"
     }
   ],
-  "registry_labels": [],
   "_comment_databricks_v2_known_models": "Authoritative list of Databricks v2 known model IDs. Mirrors goose DATABRICKS_V2_KNOWN_MODELS at revision 6789d4af (crates/goose-providers/src/databricks_v2.rs:41-42). Generated into DATABRICKS_V2_KNOWN_MODELS in both Rust and TS. Uniqueness enforced by the generator. Opt-in drift check: node scripts/generate-model-capabilities.mjs --check-goose",
   "databricks_v2_known_models": [
     "databricks-gpt-5-5",
