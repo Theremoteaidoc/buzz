@@ -6668,8 +6668,9 @@ mod tests {
 
     // ── CanvasRevisionCache tri-state (A1) ────────────────────────────────────
 
-    /// Exercises all six tri-state transitions of `CanvasRevisionCache` in sequence:
-    /// Present → stale-on-Failed → Absent clears → no-stale-after-Absent → new Present → update.
+    /// Exercises all eight tri-state transitions of `CanvasRevisionCache` in sequence:
+    /// Failed-on-empty → Present(p1) → stale-on-Failed → Present(p2) replaces p1 →
+    /// stale-on-Failed serves p2 → Absent clears → no-stale-after-Absent → new Present(p3).
     #[test]
     fn test_canvas_revision_cache_tri_state_transitions() {
         let cache = CanvasRevisionCache::new();
@@ -6682,6 +6683,10 @@ mod tests {
         let p2 = crate::queue::CanvasPointer {
             event_id: "rev2".to_string(),
             timestamp: "2024-01-16T10:00:00Z".to_string(),
+        };
+        let p3 = crate::queue::CanvasPointer {
+            event_id: "rev3".to_string(),
+            timestamp: "2024-01-17T10:00:00Z".to_string(),
         };
 
         // 1. Failed with no prior entry → None (nothing to serve stale)
@@ -6706,7 +6711,21 @@ mod tests {
             "Failed after Present must serve stale value"
         );
 
-        // 4. Absent after Present → confirmed deletion; cache cleared; returns None
+        // 4. Present(p2) while p1 is cached → p2 replaces p1 and is returned
+        assert_eq!(
+            cache.resolve_for_turn(&ch, CanvasFetchResult::Present(p2.clone())),
+            Some(p2.clone()),
+            "Present(p2) must overwrite Present(p1) and return p2"
+        );
+
+        // 5. Failed after replacement → stale p2 served (replacement persisted)
+        assert_eq!(
+            cache.resolve_for_turn(&ch, CanvasFetchResult::Failed),
+            Some(p2.clone()),
+            "Failed after replacement must serve the replaced (p2) value"
+        );
+
+        // 6. Absent after Present → confirmed deletion; cache cleared; returns None
         assert!(
             cache
                 .resolve_for_turn(&ch, CanvasFetchResult::Absent)
@@ -6714,7 +6733,7 @@ mod tests {
             "Absent must return None and clear cache"
         );
 
-        // 5. Failed after Absent → no stale entry; returns None
+        // 7. Failed after Absent → no stale entry; returns None
         assert!(
             cache
                 .resolve_for_turn(&ch, CanvasFetchResult::Failed)
@@ -6722,10 +6741,10 @@ mod tests {
             "Failed after Absent must return None (no cached entry)"
         );
 
-        // 6. New Present after Absent → pointer updated
+        // 8. New Present after Absent → pointer updated
         assert_eq!(
-            cache.resolve_for_turn(&ch, CanvasFetchResult::Present(p2.clone())),
-            Some(p2),
+            cache.resolve_for_turn(&ch, CanvasFetchResult::Present(p3.clone())),
+            Some(p3),
             "new revision after Absent must return the new pointer"
         );
     }
@@ -7369,13 +7388,28 @@ mod tests {
 
     // ── Unresolved-metadata: fetch_conversation_context DM selection (A1/A2) ──
 
-    /// Proves that `is_dm_turn = false` causes `fetch_conversation_context` to skip
-    /// the DM history fetch entirely — the `true`-arm (DM fetch issued) is covered
-    /// end-to-end by `test_run_prompt_task_dm_classification_forwarding_is_end_to_end_authoritative`.
+    /// Proves the two-sided classification behavior of `fetch_conversation_context`:
+    ///
+    /// * `is_dm_turn = false` → skips the DM history fetch entirely (None, zero requests).
+    /// * `is_dm_turn = true`  → issues the DM history fetch and returns
+    ///   `Some(ConversationContext::Dm)` when the response is non-empty.
+    ///
+    /// The end-to-end path through `run_prompt_task` (fail-closed resolver +
+    /// forwarding) is covered by
+    /// `test_run_prompt_task_dm_classification_forwarding_is_end_to_end_authoritative`.
     #[tokio::test]
     async fn test_fetch_conversation_context_dm_classification_is_authoritative() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A single valid DM event body the server returns for true-arm calls.
+        let dm_response = serde_json::json!([{
+            "content": "hello from dm",
+            "created_at": 1_700_000_000u64,
+            "pubkey": "aabbccdd"
+        }])
+        .to_string();
+        let server_dm_response = dm_response.clone();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -7391,7 +7425,12 @@ mod tests {
                 server_requests.fetch_add(1, Ordering::SeqCst);
                 let _ = socket
                     .write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]",
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            server_dm_response.len(),
+                            server_dm_response
+                        )
+                        .as_bytes(),
                     )
                     .await;
             }
@@ -7430,6 +7469,7 @@ mod tests {
             ..make_prompt_context_no_owner()
         };
 
+        // ── false arm ─────────────────────────────────────────────────────────
         // is_dm_turn = false on a non-thread batch → must return None and issue zero requests.
         let requests_before = requests.load(Ordering::SeqCst);
         let result =
@@ -7443,6 +7483,16 @@ mod tests {
             requests.load(Ordering::SeqCst),
             requests_before,
             "is_dm_turn=false must not issue any HTTP request to the DM history endpoint"
+        );
+
+        // ── true arm ──────────────────────────────────────────────────────────
+        // is_dm_turn = true → must issue the DM history fetch and return Some(Dm).
+        let result =
+            fetch_conversation_context(&make_batch(Uuid::from_u128(0x1003)), &ctx, true).await;
+
+        assert!(
+            matches!(result, Some(ConversationContext::Dm { .. })),
+            "is_dm_turn=true with a non-empty DM response must return Some(ConversationContext::Dm); got: {result:?}"
         );
 
         server.abort();
