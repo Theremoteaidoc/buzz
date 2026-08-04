@@ -106,7 +106,9 @@ const PERSON_OUTLINE_OFFSETS = [
 ] as const;
 
 // Pinned to the installed @mediapipe/tasks-vision version so the wasm loader
-// always matches the JS API.
+// always matches the JS API. This origin is allowlisted in `script-src` in
+// tauri.conf.json — changing hosts (or self-hosting the wasm) needs the CSP
+// updated in lockstep, or the packaged app silently loses segmentation.
 const MEDIAPIPE_WASM_BASE =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
 const SELFIE_SEGMENTER_MODEL_URL =
