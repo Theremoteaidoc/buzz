@@ -192,7 +192,8 @@ test.beforeEach(async ({ page }, testInfo) => {
                   },
                   linkPreviewMetadataDelayMs: 800,
                 }
-              : testInfo.title.includes("link preview no-image layout")
+              : testInfo.title.includes("link preview no-image layout") ||
+                  testInfo.title.includes("composer no-image link embeds")
                 ? {
                     linkPreviewMetadata: {
                       title: "Buzz",
