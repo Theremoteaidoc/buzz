@@ -1731,6 +1731,41 @@ fn is_retryable_transport_error(e: &reqwest::Error) -> bool {
     e.is_timeout() || e.is_connect() || e.is_request()
 }
 
+/// Produce a human-readable description of a transport-layer reqwest error.
+///
+/// reqwest's `Display` for a `read_timeout` fire is the opaque
+/// `"error sending request for url (...)"` — the same text as every other
+/// pre-response failure — because the HTTP layer lumps them together.
+/// When the error is a timeout we replace that string with a message that
+/// names the actual cause, making it immediately obvious in logs that the
+/// problem is a long-running server-side generation, not a network fault.
+fn classify_transport_error(e: &reqwest::Error) -> String {
+    if e.is_timeout() {
+        "read timeout (no response bytes — likely long generation/thinking; \
+         consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
+            .to_owned()
+    } else {
+        format!("transport: {e}")
+    }
+}
+
+/// Produce a human-readable description of an error that occurred while
+/// reading response body chunks (`resp.chunk()`).
+///
+/// A timeout here (the server sent headers but then went silent mid-body)
+/// gets the same informative message as a pre-response timeout.  Any other
+/// body-decode failure preserves the `"body read: ..."` prefix expected by
+/// callers and existing tests.
+fn classify_body_read_error(e: &reqwest::Error) -> String {
+    if e.is_timeout() {
+        "read timeout (no response bytes — likely long generation/thinking; \
+         consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
+            .to_owned()
+    } else {
+        format!("body read: {e}")
+    }
+}
+
 fn is_unsupported_image_input_error(body: &str) -> bool {
     body.to_ascii_lowercase()
         .contains("no endpoints found that support image input")
@@ -1840,6 +1875,7 @@ where
                         attempt = attempt + 1,
                         max_attempts = MAX_RETRIES,
                         error = %e,
+                        is_timeout = e.is_timeout(),
                         "llm: transport error, retrying"
                     );
                     backoff_with_jitter(attempt).await;
@@ -1848,7 +1884,7 @@ where
                 return Err(PostError::Agent(terminal_llm_error(
                     call_start.elapsed(),
                     attempt + 1,
-                    &format!("transport: {e}"),
+                    &classify_transport_error(&e),
                 )));
             }
         };
@@ -1944,7 +1980,7 @@ where
                     return Err(PostError::Agent(terminal_llm_error(
                         call_start.elapsed(),
                         attempt + 1,
-                        &format!("body read: {e}"),
+                        &classify_body_read_error(&e),
                     )));
                 }
             }
@@ -2120,6 +2156,7 @@ async fn openrouter_post(
                         attempt = attempt + 1,
                         max_attempts = MAX_RETRIES,
                         error = %e,
+                        is_timeout = e.is_timeout(),
                         "llm: openrouter transport error, retrying"
                     );
                     backoff_with_jitter(attempt).await;
@@ -2128,7 +2165,7 @@ async fn openrouter_post(
                 return Err(terminal_llm_error(
                     call_start.elapsed(),
                     attempt + 1,
-                    &format!("transport: {e}"),
+                    &classify_transport_error(&e),
                 ));
             }
         };
@@ -2263,7 +2300,7 @@ async fn openrouter_post(
                     return Err(terminal_llm_error(
                         call_start.elapsed(),
                         attempt + 1,
-                        &format!("body read: {e}"),
+                        &classify_body_read_error(&e),
                     ))
                 }
             }
@@ -4449,6 +4486,82 @@ mod tests {
         assert_eq!(
             warnings, 1,
             "exactly one stall warning with duration+attempts fields at threshold"
+        );
+    }
+
+    // ---- classify_transport_error -------------------------------------------
+
+    /// A timeout error must produce a message that names the cause and
+    /// references the config knob — not the opaque reqwest "error sending
+    /// request" string that makes the log unreadable.
+    ///
+    /// We build a synthetic `reqwest::Error` by timing out a real loopback
+    /// connection; this is the only public way to construct one for test.
+    #[tokio::test]
+    async fn classify_transport_error_timeout_names_cause() {
+        use tokio::net::TcpListener;
+
+        // Bind a port and never accept — client times out waiting for bytes.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Keep the listener alive for the duration so the TCP connect succeeds
+        // (connect success + read silence = timeout, not connection refused).
+        let _listener = listener;
+
+        let client = reqwest::Client::builder()
+            .read_timeout(std::time::Duration::from_millis(50))
+            .build()
+            .unwrap();
+
+        let err = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("must time out");
+
+        assert!(err.is_timeout(), "precondition: reqwest reports is_timeout");
+
+        let msg = classify_transport_error(&err);
+        assert!(
+            msg.contains("read timeout"),
+            "timeout error must say 'read timeout': {msg}"
+        );
+        assert!(
+            msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            "timeout error must name the config knob: {msg}"
+        );
+        assert!(
+            !msg.contains("error sending request"),
+            "timeout error must not use the opaque reqwest string: {msg}"
+        );
+    }
+
+    /// A non-timeout transport error (connection refused) must still carry the
+    /// original reqwest error text so nothing diagnostic is lost.
+    #[tokio::test]
+    async fn classify_transport_error_non_timeout_preserves_reqwest_text() {
+        // Port 1 is almost always refused — good enough for a connect error.
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap();
+
+        let err = client
+            .get("http://127.0.0.1:1/")
+            .send()
+            .await
+            .expect_err("must fail to connect");
+
+        // Connection refused is not a timeout.
+        assert!(
+            !err.is_timeout(),
+            "precondition: connect-refused is not a timeout"
+        );
+
+        let msg = classify_transport_error(&err);
+        assert!(
+            msg.starts_with("transport: "),
+            "non-timeout error must be prefixed 'transport: ': {msg}"
         );
     }
 
