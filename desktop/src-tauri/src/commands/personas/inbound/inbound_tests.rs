@@ -258,6 +258,60 @@ fn foreign_agent_event_with_secrets(d_tag: &str) -> nostr::Event {
 /// record, and that every projected field IS updated. The projection type is
 /// the structural guard — the injected keys cannot even be represented.
 #[test]
+fn private_aggregate_reconstructs_portable_agent_and_authority() {
+    use crate::managed_agents::migration::{build_migration_candidate, CasMetadata};
+    use nostr::{Keys, ToBech32};
+
+    let owner = Keys::generate();
+    let agent = Keys::generate();
+    let mut source = local_agent();
+    source.pubkey = agent.public_key().to_hex();
+    source.private_key_nsec = agent.secret_key().to_bech32().unwrap();
+    source.persona_id = None;
+    source.slug = Some("recovered-agent".to_string());
+    source.relay_mesh = Some(crate::managed_agents::RelayMeshConfig {
+        model_ref: "mesh/recovered".to_string(),
+    });
+    let mut definition_source = source.clone();
+    definition_source.pubkey.clear();
+    let definition = definition_source.to_definition_view().unwrap();
+    let definition_event = crate::managed_agents::persona_events::build_persona_event(&definition)
+        .unwrap()
+        .sign_with_keys(&owner)
+        .unwrap();
+    let instance_event = crate::managed_agents::agent_events::build_agent_event(&source)
+        .unwrap()
+        .sign_with_keys(&owner)
+        .unwrap();
+    let candidate = build_migration_candidate(
+        &source,
+        &owner,
+        &agent,
+        definition_event,
+        instance_event,
+        &CasMetadata {
+            generation: 1,
+            previous_event_id: None,
+            definition_revision: 1,
+        },
+        ["nip-pma-aggregate-v1"],
+        1_700_000_000,
+    )
+    .unwrap();
+
+    let reconstructed =
+        reconstruct_managed_agent_from_payload(&candidate.payload, &candidate.signed_event).unwrap();
+    assert_eq!(reconstructed.pubkey, source.pubkey);
+    assert_eq!(reconstructed.private_key_nsec, source.private_key_nsec);
+    assert_eq!(reconstructed.backend, source.backend);
+    assert_eq!(reconstructed.env_vars, source.env_vars);
+    assert_eq!(reconstructed.relay_mesh, source.relay_mesh);
+    let evidence = reconstructed.relay_authority.evidence().unwrap();
+    assert_eq!(evidence.generation, 1);
+    assert_eq!(evidence.private_event_id, candidate.signed_event.id.to_hex());
+}
+
+#[test]
 fn inbound_managed_agent_drops_injected_secrets_and_harness() {
     let event = foreign_agent_event_with_secrets(AGENT_PUBKEY);
     let content =
