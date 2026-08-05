@@ -1,11 +1,15 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
-import { relayMembersQueryKey } from "@/features/community-members/hooks";
+import {
+  myRelayMembershipLookupQueryKey,
+  relayMembersQueryKey,
+} from "@/features/community-members/hooks";
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
   joinAlertBody,
+  joinAlertSummaryBody,
   joinAlertTitle,
   normalizeJoinPubkey,
   readJoinAlertLedger,
@@ -13,6 +17,7 @@ import {
   writeJoinAlertLedger,
   type JoinAlertLedger,
   EMPTY_JOIN_ALERT_LEDGER,
+  JOIN_ALERT_MAX_INDIVIDUAL,
 } from "@/features/community-members/lib/joinAlerts";
 import { sendDesktopNotification } from "@/features/notifications/lib/desktop";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
@@ -28,6 +33,15 @@ import type { RelayEvent } from "@/shared/api/types";
 
 const KIND_NIP43_MEMBERSHIP_LIST = 13534;
 const KIND_NIP43_MEMBER_ADDED = 8000;
+
+/**
+ * Trailing window for coalescing kind:8000-triggered snapshot refetches.
+ *
+ * Long enough that a bulk add collapses to a single REQ, short enough that a
+ * lone join still feels immediate — the accelerator exists only to beat the
+ * live snapshot's own arrival, so sub-second is the whole budget.
+ */
+const MEMBER_REFRESH_DEBOUNCE_MS = 500;
 
 /**
  * Notify community owners/admins the first time a key appears in their roster.
@@ -73,14 +87,38 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
   const handleSnapshot = React.useEffectEvent(async (event: RelayEvent) => {
     if (communityId === null) return;
 
-    const rosterPubkeys = relayMembersFromEvent(event).map(
-      (member) => member.pubkey,
-    );
+    const roster = relayMembersFromEvent(event);
+    const rosterPubkeys = roster.map((member) => member.pubkey);
     if (rosterPubkeys.length === 0) return;
 
     // The roster can change shape without anything being new to us (a removal
     // or a role change), so refresh the panel regardless of alert eligibility.
     void queryClient.invalidateQueries({ queryKey: relayMembersQueryKey });
+
+    // Authorize against the snapshot in hand, not the cached role that mounted
+    // this effect. `useMyRelayMembershipLookupQuery` is only invalidated by this
+    // client's own membership mutations, and `staleTime` marks data stale
+    // without scheduling a refetch, so a viewer demoted by another admin keeps
+    // a cached owner/admin role for as long as the app stays open — and would
+    // otherwise keep learning every later joiner's identity from a role they no
+    // longer hold. The snapshot carries the viewer's own role
+    // (`["member", pubkey, role]`, relay-signed in `publish_nip43_membership_locked`),
+    // so the event that revokes authorization is the same event that would
+    // disclose the join. Checking it here closes that race in one read rather
+    // than racing an async invalidation.
+    //
+    // Fail closed: a snapshot that does not list the viewer at all means they
+    // were removed outright.
+    const viewerEntry = roster.find(
+      (member) => member.pubkey === normalizedViewer,
+    );
+    if (viewerEntry?.role !== "owner" && viewerEntry?.role !== "admin") {
+      // Refresh the mount gate so the subscriptions themselves tear down.
+      void queryClient.invalidateQueries({
+        queryKey: myRelayMembershipLookupQueryKey,
+      });
+      return;
+    }
 
     const { alerts, changed, ledger } = reconcileJoinAlertLedger({
       ledger: ledgerRef.current,
@@ -106,6 +144,23 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
 
     // Resolve display names so the alert reads "Alice joined" rather than a
     // truncated key; a lookup failure degrades to the key, it does not skip.
+    //
+    // Above the cap the batch collapses into one summary, so skip the profile
+    // fetch entirely — it would be a 250-key request whose result is unused.
+    if (alerts.length > JOIN_ALERT_MAX_INDIVIDUAL) {
+      await sendDesktopNotification({
+        body: joinAlertSummaryBody(alerts.length),
+        target: {
+          channelId: null,
+          eventId: event.id,
+          kind: event.kind,
+          pubkey: undefined,
+        },
+        title: joinAlertTitle(communityNameRef.current),
+      });
+      return;
+    }
+
     let profiles: UserProfileLookup | undefined;
     try {
       profiles = (await getUsersBatch(alerts)).profiles;
@@ -136,6 +191,7 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
 
     let disposed = false;
     const disposers: Array<() => Promise<void>> = [];
+    let refreshTimeout: number | null = null;
 
     const track = (unsubscribe: () => Promise<void>) => {
       if (disposed) {
@@ -145,7 +201,7 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
       disposers.push(unsubscribe);
     };
 
-    const refreshSnapshot = () => {
+    const fetchSnapshot = () => {
       void relayClient
         .fetchFirstEvent({ kinds: [KIND_NIP43_MEMBERSHIP_LIST], limit: 1 })
         .then((snapshot) => {
@@ -154,6 +210,24 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
         .catch(() => {
           // Best effort: the live 13534 subscription still delivers.
         });
+    };
+
+    /**
+     * Coalesce refetches on a trailing window.
+     *
+     * Each refetch is a REQ frame, and REQ is billed against the same per-
+     * principal `WsEvents` budget as the user's own sends (default 10/s over a
+     * 5s window). A bulk add emits one kind:8000 per member, so an uncoalesced
+     * 1:1 refetch would spend the budget the owner needs for messages and
+     * channel opens — rate-limiting them out of their own app. One snapshot is
+     * authoritative for the whole burst, so the trailing edge loses nothing.
+     */
+    const refreshSnapshot = () => {
+      if (disposed || refreshTimeout !== null) return;
+      refreshTimeout = window.setTimeout(() => {
+        refreshTimeout = null;
+        if (!disposed) fetchSnapshot();
+      }, MEMBER_REFRESH_DEBOUNCE_MS);
     };
 
     void relayClient
@@ -183,6 +257,7 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
 
     return () => {
       disposed = true;
+      if (refreshTimeout !== null) window.clearTimeout(refreshTimeout);
       unsubscribeReconnect();
       for (const dispose of disposers) void dispose();
     };

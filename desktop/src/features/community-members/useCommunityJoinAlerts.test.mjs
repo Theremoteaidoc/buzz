@@ -254,20 +254,36 @@ import {
 const VIEWER = "a".repeat(64);
 const ALICE = "b".repeat(64);
 const BOB = "c".repeat(64);
+const CAROL = "d".repeat(64);
 const COMMUNITY_A = "community-a";
 const COMMUNITY_B = "community-b";
 
 const KIND_SNAPSHOT = 13534;
 const KIND_MEMBER_ADDED = 8000;
 
-/** A kind:13534 membership snapshot carrying the given roster. */
-function snapshot(rosterPubkeys, { id = "snap-1", createdAt = 1000 } = {}) {
+/**
+ * A kind:13534 membership snapshot carrying the given roster.
+ *
+ * The viewer is stamped `owner` unless `viewerRole` says otherwise, mirroring
+ * the relay: `publish_nip43_membership_locked` emits `["member", pubkey, role]`
+ * for every row, so the viewer's own authorization always rides in the
+ * snapshot. A fixture that stamped everyone `member` could not express the
+ * demotion this hook now gates on.
+ */
+function snapshot(
+  rosterPubkeys,
+  { id = "snap-1", createdAt = 1000, viewerRole = "owner" } = {},
+) {
   return {
     id,
     pubkey: "f".repeat(64),
     created_at: createdAt,
     kind: KIND_SNAPSHOT,
-    tags: rosterPubkeys.map((pubkey) => ["member", pubkey, "member"]),
+    tags: rosterPubkeys.map((pubkey) => [
+      "member",
+      pubkey,
+      pubkey === VIEWER ? viewerRole : "member",
+    ]),
     content: "",
     sig: "s".repeat(128),
   };
@@ -441,6 +457,20 @@ async function settle(iterations = 4) {
   }
 }
 
+/**
+ * Advance past the kind:8000 refetch debounce, then settle.
+ *
+ * The accelerator coalesces refetches on a 500ms trailing window so a bulk add
+ * costs one REQ instead of one per member; anything asserting on a refetch has
+ * to outwait that window or it is asserting on a timer that has not fired.
+ */
+async function settleAfterRefreshDebounce() {
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 600));
+  });
+  await settle();
+}
+
 function ledgerKeys() {
   return [...storage.keys()].filter((key) =>
     key.startsWith("buzz-community-join-seen.v1"),
@@ -585,7 +615,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
       snapshot([VIEWER, ALICE, BOB], { id: "snap-replay", createdAt: 2000 }),
     );
     relay.emitReconnect();
-    await settle();
+    await settleAfterRefreshDebounce();
 
     assert.ok(
       relay.counts().fetchFirstEventCalls > before,
@@ -605,7 +635,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
       }),
     );
     relay.emitReconnect();
-    await settle();
+    await settleAfterRefreshDebounce();
 
     assert.equal(
       notifications.length,
@@ -651,7 +681,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
       content: "",
       sig: "s".repeat(128),
     });
-    await settle();
+    await settleAfterRefreshDebounce();
 
     assert.ok(
       relay.counts().fetchFirstEventCalls > before,
@@ -676,7 +706,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
       content: "",
       sig: "s".repeat(128),
     });
-    await settle();
+    await settleAfterRefreshDebounce();
 
     assert.equal(notifications.length, 1);
 
@@ -875,6 +905,206 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
         (key) => JSON.stringify(key) === JSON.stringify(relayMembersQueryKey),
       ),
       "the seeding snapshot must still refresh the roster panel",
+    );
+
+    await unmount();
+  });
+  /**
+   * Authorization must come from the snapshot in hand, not the cached role that
+   * mounted the effect.
+   *
+   * `useMyRelayMembershipLookupQuery` is invalidated only by this client's own
+   * membership mutations, and `staleTime` marks data stale without scheduling a
+   * refetch — so a viewer demoted by ANOTHER admin keeps a cached owner/admin
+   * role for as long as the app stays open. Found by Wren, reproduced live by
+   * Max against a real relay: the demoted viewer kept learning every later
+   * joiner's identity.
+   *
+   * The demotion and the join ride in the SAME snapshot, which is the racy
+   * shape: an async invalidation cannot beat the handler it is racing.
+   */
+  it("stops alerting when the snapshot itself demotes the viewer", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook({ role: "admin" });
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER, ALICE], { viewerRole: "admin" }));
+    await settle();
+
+    // Positive control: still admin, so a genuine join must alert. Without
+    // this, a gate that refused everything would pass the assertions below.
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB], { id: "snap-join", viewerRole: "admin" }),
+    );
+    await settle();
+    assert.equal(notifications.length, 1, "precondition: admin still alerts");
+
+    const ledgerBefore = storage.get(joinAlertStorageKey(COMMUNITY_A, VIEWER));
+
+    // Remote demotion + a new member, in one authoritative snapshot.
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB, CAROL], {
+        id: "snap-demote",
+        createdAt: 4000,
+        viewerRole: "member",
+      }),
+    );
+    await settle();
+
+    assert.equal(
+      notifications.length,
+      1,
+      "a demoted viewer must not be told who joined",
+    );
+    assert.equal(
+      storage.get(joinAlertStorageKey(COMMUNITY_A, VIEWER)),
+      ledgerBefore,
+      "the ledger must not advance on a snapshot the viewer is not authorized for",
+    );
+
+    await unmount();
+  });
+
+  /**
+   * Removal is the same disclosure as demotion, and `find` returning undefined
+   * is a different code path from a role that is present but wrong.
+   */
+  it("stops alerting when the viewer is dropped from the roster entirely", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook({ role: "owner" });
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER, ALICE]));
+    await settle();
+
+    // Viewer absent from the snapshot; a new key arrives alongside.
+    relay.emitSnapshot({
+      id: "snap-removed",
+      pubkey: "f".repeat(64),
+      created_at: 5000,
+      kind: KIND_SNAPSHOT,
+      tags: [
+        ["member", ALICE, "member"],
+        ["member", BOB, "member"],
+      ],
+      content: "",
+      sig: "s".repeat(128),
+    });
+    await settle();
+
+    assert.equal(
+      notifications.length,
+      0,
+      "a removed viewer must learn nothing about later joins",
+    );
+
+    await unmount();
+  });
+
+  /**
+   * A snapshot is a whole roster, so a bulk add lands every new key at once.
+   * Uncapped that is one OS notification per member — measured at 248 banners
+   * for a 250-key snapshot, delivered through a serial await loop.
+   */
+  it("collapses a bulk join into one summary instead of a banner per member", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook();
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER, ALICE]));
+    await settle();
+
+    const bulk = [];
+    for (let i = 0; i < 40; i++) {
+      bulk.push(`${i.toString(16).padStart(2, "0").repeat(31)}ff`);
+    }
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, ...bulk], { id: "snap-bulk", createdAt: 6000 }),
+    );
+    await settle(10);
+
+    assert.equal(notifications.length, 1, "one summary, not one per member");
+    assert.equal(notifications[0].body, "40 new members joined");
+
+    await unmount();
+  });
+
+  /**
+   * Below the cap the alert still names people — the summary must not swallow
+   * the ordinary one-or-two-join case the feature exists for.
+   */
+  it("still names individuals for a small batch", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook();
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER, ALICE]));
+    await settle();
+
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB, CAROL], {
+        id: "snap-two",
+        createdAt: 7000,
+      }),
+    );
+    await settle(10);
+
+    assert.equal(notifications.length, 2, "two joins, two named alerts");
+    assert.ok(
+      notifications.every((entry) => entry.body.endsWith(" joined")),
+      "each alert names the joiner rather than summarizing",
+    );
+
+    await unmount();
+  });
+
+  /**
+   * Each refetch is a REQ frame billed against the same per-principal WsEvents
+   * budget as the user's own sends (default 10/s over a 5s window), and a bulk
+   * add emits one kind:8000 per member. Uncoalesced that was 250 REQs for 250
+   * deltas — spending the budget the owner needs to send messages and open
+   * channels.
+   */
+  it("coalesces a burst of kind:8000 deltas into a single refetch", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook();
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER, ALICE]));
+    await settle();
+
+    const before = relay.counts().fetchFirstEventCalls;
+    relay.setRefetchSnapshot(
+      snapshot([VIEWER, ALICE], { id: "snap-burst", createdAt: 8000 }),
+    );
+
+    for (let i = 0; i < 50; i++) {
+      relay.emitDelta({
+        id: `burst-${i}`,
+        pubkey: "f".repeat(64),
+        created_at: 8000 + i,
+        kind: KIND_MEMBER_ADDED,
+        tags: [["p", BOB]],
+        content: "",
+        sig: "s".repeat(128),
+      });
+    }
+    await settleAfterRefreshDebounce();
+
+    assert.equal(
+      relay.counts().fetchFirstEventCalls - before,
+      1,
+      "50 deltas must cost exactly one REQ, not 50",
     );
 
     await unmount();

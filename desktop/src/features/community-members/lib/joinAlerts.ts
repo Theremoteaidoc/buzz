@@ -208,3 +208,20 @@ export function joinAlertTitle(communityName: string | null | undefined) {
 export function joinAlertBody(displayName: string) {
   return `${displayName} joined`;
 }
+
+/**
+ * Most per-key notifications emitted for a single snapshot.
+ *
+ * Above this, one summary replaces the batch. A snapshot is a whole roster, not
+ * an event per join, so a bulk import or an invite link shared into a group
+ * chat lands every new key at once: without a cap that is one OS notification
+ * per member (measured: a 250-key snapshot emitted 248 banners in a serial
+ * loop). The cap is deliberately small — past a handful the individual
+ * identities are unreadable as notifications anyway, and the useful signal is
+ * that a batch arrived.
+ */
+export const JOIN_ALERT_MAX_INDIVIDUAL = 3;
+
+export function joinAlertSummaryBody(count: number) {
+  return `${count} new members joined`;
+}
