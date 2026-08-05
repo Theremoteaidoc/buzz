@@ -163,12 +163,13 @@ fn require_owner(client: &BuzzClient) -> Result<PublicKey, CliError> {
 /// Resolve the optional NIP-OA `auth` tag for archive/unarchive requests.
 ///
 /// Mirrors the desktop's `maybe_owner_auth_tag`:
-/// - `target == signer`: self path — no auth needed → `Ok(None)`.
+/// - `target == signer`: self path — no auth needed → `Ok(None)`, silent.
 /// - Otherwise: fetch target's kind:0, look for an `auth` tag whose owner
-///   (index 1) matches the signer. Return it when present; `Ok(None)` when
-///   absent or structurally malformed. Query/network failures surface as
-///   `Err` — silent degradation to bare would make the relay reject the
-///   request with a misleading error.
+///   (index 1) matches the signer. Return it when present. When the tag is
+///   absent or cannot be extracted, emit a structured diagnostic to stderr
+///   naming the exact cause and then return `Ok(None)` — the bare request
+///   is still sent so relay admins can succeed without owner attestation.
+///   Query/network failures surface as `Err`.
 async fn resolve_auth(
     client: &BuzzClient,
     target_hex: &str,
@@ -186,13 +187,95 @@ async fn resolve_auth(
         .map_err(|e| CliError::Other(format!("invalid kind:0 query response: {e}")))?;
     let event = match events.into_iter().next() {
         Some(e) => e,
-        None => return Ok(None),
+        None => {
+            eprintln!(
+                "warning: no kind:0 profile found for target {target_hex} — \
+                 proceeding without owner attestation; this succeeds only if your key is a relay admin"
+            );
+            return Ok(None);
+        }
     };
     let tags = match event.get("tags").and_then(|v| v.as_array()) {
         Some(t) => t,
-        None => return Ok(None),
+        None => {
+            eprintln!(
+                "warning: target {target_hex} kind:0 has no tags array — \
+                 proceeding without owner attestation; this succeeds only if your key is a relay admin"
+            );
+            return Ok(None);
+        }
     };
-    Ok(extract_owner_auth_tag(tags, signer_hex))
+    match extract_owner_auth_tag(tags, signer_hex) {
+        Some(tag) => Ok(Some(tag)),
+        None => {
+            let diag = describe_auth_failure(tags, signer_hex);
+            eprintln!(
+                "warning: {diag} — \
+                 proceeding without owner attestation; this succeeds only if your key is a relay admin"
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Describe why `extract_owner_auth_tag` returned `None` for a non-empty tags
+/// array. Called only in the failure branch of `resolve_auth` to produce a
+/// human-readable diagnostic. Keeps `extract_owner_auth_tag` pure.
+fn describe_auth_failure(tags: &[serde_json::Value], signer_hex: &str) -> String {
+    let auth_tags: Vec<&serde_json::Value> = tags
+        .iter()
+        .filter(|tag| {
+            tag.as_array()
+                .and_then(|elems| elems.first())
+                .and_then(|v| v.as_str())
+                == Some("auth")
+        })
+        .collect();
+    match auth_tags.len() {
+        0 => "target kind:0 has no \"auth\" tag".to_owned(),
+        n if n > 1 => format!(
+            "target kind:0 has {n} \"auth\" tags (expected exactly 1) — ambiguous ownership"
+        ),
+        _ => {
+            // Exactly one auth tag. Determine the structural failure.
+            let elems = match auth_tags[0].as_array() {
+                Some(e) => e,
+                None => return "sole \"auth\" tag is not a JSON array".to_owned(),
+            };
+            if elems.len() != 4 {
+                return format!(
+                    "sole \"auth\" tag has {} element(s) (expected 4: label, owner, conditions, sig)",
+                    elems.len()
+                );
+            }
+            // Check each element is a string before inspecting values.
+            let owner_val = &elems[1];
+            let sig_val = &elems[3];
+            if elems[0].as_str().is_none()
+                || owner_val.as_str().is_none()
+                || elems[2].as_str().is_none()
+                || sig_val.as_str().is_none()
+            {
+                return "sole \"auth\" tag contains a non-string element".to_owned();
+            }
+            let owner = owner_val.as_str().unwrap();
+            let sig = sig_val.as_str().unwrap();
+            // Owner hex validation.
+            if owner.len() != 64 || !owner.chars().all(|c| c.is_ascii_hexdigit()) {
+                return format!(
+                    "sole \"auth\" tag owner field is not a valid 64-hex pubkey: {owner}"
+                );
+            }
+            // Sig hex validation.
+            if sig.len() != 128 || !sig.chars().all(|c| c.is_ascii_hexdigit()) {
+                return "sole \"auth\" tag sig field is not a valid 128-hex signature".to_owned();
+            }
+            // Owner mismatch — the tag is structurally valid but names a different owner.
+            format!(
+                "sole \"auth\" tag names owner {owner} which does not match your key {signer_hex}"
+            )
+        }
+    }
 }
 
 /// Pure extraction helper: require exactly one kind:0 tag whose first
@@ -519,6 +602,119 @@ mod tests {
             json!(["auth", "not-hex", "conditions"]),
         ];
         assert!(extract_owner_auth_tag(&tags, &signer).is_none());
+    }
+
+    // --- (c) auth-failure diagnostic: describe_auth_failure ---
+    //
+    // Covers the four cause categories Paul named. Each test asserts the
+    // diagnostic string contains the key identifying phrase so tests stay
+    // readable without tying to exact wording.
+
+    #[test]
+    fn auth_failure_no_auth_tag_names_absent_tag() {
+        // Case 3 (zero auth tags): kind:0 has tags but none labelled "auth".
+        let signer = hex64('a');
+        let tags = vec![json!(["p", hex64('b')]), json!(["e", hex64('c')])];
+        let msg = describe_auth_failure(&tags, &signer);
+        assert!(
+            msg.contains("no \"auth\" tag"),
+            "expected 'no auth tag' message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn auth_failure_empty_tags_names_absent_tag() {
+        // Edge case: tags array exists but is empty — treated as no auth tag.
+        let signer = hex64('a');
+        let msg = describe_auth_failure(&[], &signer);
+        assert!(
+            msg.contains("no \"auth\" tag"),
+            "expected 'no auth tag' message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn auth_failure_duplicate_auth_tags_names_count() {
+        // Case 3 (>1 auth tags): ambiguous ownership.
+        let signer = hex64('a');
+        let sig = hex128('b');
+        let tags = vec![
+            json!(["auth", signer, "conditions", sig]),
+            json!(["auth", signer, "conditions", sig]),
+        ];
+        let msg = describe_auth_failure(&tags, &signer);
+        assert!(
+            msg.contains('2') && msg.contains("ambiguous"),
+            "expected count + ambiguous message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn auth_failure_malformed_wrong_arity_names_element_count() {
+        // Case 4: sole auth tag has wrong arity (3 elements instead of 4).
+        let signer = hex64('a');
+        let tags = vec![json!(["auth", signer, "conditions"])];
+        let msg = describe_auth_failure(&tags, &signer);
+        assert!(
+            msg.contains("element") && msg.contains('3'),
+            "expected element-count message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn auth_failure_malformed_non_string_element() {
+        // Case 4: sole auth tag contains a non-string element (numeric conditions).
+        let signer = hex64('a');
+        let tags = vec![json!(["auth", signer, 42, hex128('b')])];
+        let msg = describe_auth_failure(&tags, &signer);
+        assert!(
+            msg.contains("non-string"),
+            "expected non-string message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn auth_failure_malformed_non_hex_owner_names_owner() {
+        // Case 4: owner field is not valid 64-hex.
+        let bad_owner = "z".repeat(64);
+        let tags = vec![json!(["auth", bad_owner, "", hex128('a')])];
+        let msg = describe_auth_failure(&tags, &bad_owner);
+        assert!(
+            msg.contains("owner field") && msg.contains("not a valid 64-hex"),
+            "expected owner-hex message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn auth_failure_malformed_non_hex_sig_names_sig() {
+        // Case 4: sig field is not valid 128-hex.
+        let signer = hex64('a');
+        let bad_sig = "z".repeat(128);
+        let tags = vec![json!(["auth", signer, "", bad_sig])];
+        let msg = describe_auth_failure(&tags, &signer);
+        assert!(
+            msg.contains("sig field") && msg.contains("not a valid 128-hex"),
+            "expected sig-hex message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn auth_failure_owner_mismatch_names_actual_owner_and_signer() {
+        // Case 4: structurally valid tag but owner pubkey ≠ signer — the
+        // diagnostic must print the actual owner so the user can act on it.
+        let actual_owner = hex64('a');
+        let signer = hex64('b');
+        let sig = hex128('c');
+        let tags = vec![json!(["auth", actual_owner, "conditions", sig])];
+        let msg = describe_auth_failure(&tags, &signer);
+        assert!(
+            msg.contains(&actual_owner) && msg.contains(&signer),
+            "expected both owner and signer pubkeys in message, got: {msg}"
+        );
+        assert!(
+            msg.contains("does not match"),
+            "expected mismatch language, got: {msg}"
+        );
     }
 
     // --- (d) NIP-11 self normalization: normalize_relay_self_hex ---
