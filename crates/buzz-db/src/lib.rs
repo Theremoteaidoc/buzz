@@ -27,6 +27,8 @@ pub mod event;
 pub mod feed;
 /// Git repository name registry (NIP-34 kind:30617).
 pub mod git_repo;
+/// Transactional private managed-agent authority.
+pub mod managed_agent;
 /// Embedded database migrations.
 pub mod migration;
 /// Community moderation: reports, bans/timeouts, audit actions.
@@ -4777,6 +4779,25 @@ impl Db {
 
     /// Atomically replace a NIP-33 parameterized replaceable event (kind 30000–39999).
     ///
+    /// Atomically commit a relay-verifiable private managed-agent aggregate.
+    pub async fn commit_managed_agent_aggregate(
+        &self,
+        community_id: CommunityId,
+        request: &managed_agent::AggregateRequest,
+    ) -> Result<managed_agent::AggregateCommit> {
+        managed_agent::commit_aggregate(&self.pool, community_id, request).await
+    }
+
+    /// Whether an ordinary projection targets PMA-authoritative state.
+    pub async fn managed_agent_projection_is_authoritative(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        d_tag: &str,
+    ) -> Result<bool> {
+        managed_agent::projection_is_authoritative(&self.pool, community_id, event, d_tag).await
+    }
+
     /// Keeps only the event with the highest `created_at` per `(kind, pubkey, d_tag)`.
     /// Same-second ties are broken by lowest event `id` (deterministic ordering).
     /// The entire check → retire old payload → insert runs in a single transaction

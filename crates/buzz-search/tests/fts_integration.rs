@@ -28,6 +28,8 @@ const MIGRATION_0007_SQL: &str = include_str!("../../../migrations/0007_nip_rs_r
 const MIGRATION_0008_SQL: &str =
     include_str!("../../../migrations/0008_fresh_install_search_allowlist.sql");
 const MIGRATION_0014_SQL: &str = include_str!("../../../migrations/0014_push_lease_fts.sql");
+const MIGRATION_0028_SQL: &str =
+    include_str!("../../../migrations/0028_private_managed_agent_authority.sql");
 
 async fn setup() -> (PgPool, String) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
@@ -81,6 +83,9 @@ async fn setup() -> (PgPool, String) {
     pool.execute(MIGRATION_0014_SQL)
         .await
         .expect("apply 0014 migration");
+    pool.execute(MIGRATION_0028_SQL)
+        .await
+        .expect("apply 0028 migration");
     (pool, schema)
 }
 
@@ -1229,6 +1234,7 @@ async fn excluded_kinds_are_storage_level_unsearchable() {
     // Negative (load-bearing): each excluded kind MUST NOT surface.
     for forbidden in [
         1059,
+        30179,
         30300,
         30622,
         KIND_MEMBER_ADDED_NOTIFICATION as i32,

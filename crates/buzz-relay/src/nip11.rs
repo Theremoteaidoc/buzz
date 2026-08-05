@@ -162,7 +162,10 @@ impl RelayInfo {
             pubkey: None,
             contact: None,
             supported_nips,
-            supported_extensions: Some(vec!["nip-er".to_string()]),
+            supported_extensions: Some(vec![
+                "nip-er".to_string(),
+                "nip-pma-aggregate-v1".to_string(),
+            ]),
             push: None,
             software: "https://github.com/block/buzz".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -387,6 +390,17 @@ mod tests {
             SUPPORTED_NIPS.contains(&56),
             "NIP-56 (reporting) must be advertised — kind:1984 ingest is live"
         );
+    }
+
+    #[test]
+    fn build_advertises_private_managed_agent_aggregate_v1() {
+        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        assert!(info
+            .supported_extensions
+            .as_ref()
+            .is_some_and(|extensions| extensions
+                .iter()
+                .any(|extension| extension == "nip-pma-aggregate-v1")));
     }
 
     #[test]

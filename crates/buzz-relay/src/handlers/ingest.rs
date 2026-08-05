@@ -2759,6 +2759,20 @@ async fn ingest_event_inner(
         });
     }
 
+    if matches!(kind_u32, KIND_PERSONA | KIND_MANAGED_AGENT) {
+        let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
+        if state
+            .db
+            .managed_agent_projection_is_authoritative(tenant.community(), &event, &d_tag)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: PMA authority check failed: {e}")))?
+        {
+            return Err(IngestError::Rejected(
+                "restricted: projection is controlled by a private managed-agent aggregate".into(),
+            ));
+        }
+    }
+
     let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.

@@ -943,12 +943,17 @@ mod tests {
 
         // Private managed-agent ciphertext is author-only and must remain
         // unsearchable on brownfield databases without changing 0001's sqlx
-        // checksum. The additive wrapper preserves the existing expression.
+        // checksum. Migration 0028 also installs the relay authority tables.
         assert_eq!(migrations[27].version, 28);
         let private_managed_agent = migrations[27].sql.as_str();
+        assert!(private_managed_agent.contains("CREATE TABLE managed_agent_heads"));
+        assert!(private_managed_agent.contains("CREATE TABLE managed_agent_revisions"));
         assert!(private_managed_agent.contains("kind = 30179"));
         assert!(private_managed_agent.contains("pg_get_expr"));
         assert!(private_managed_agent.contains("search_tsv"));
+        assert!(desired_schema.contains("CREATE TABLE managed_agent_heads"));
+        assert!(desired_schema.contains("CREATE TABLE managed_agent_revisions"));
+        assert!(desired_schema.contains("30179"));
         assert!(!migrations[0].sql.as_str().contains("30179"));
     }
 

@@ -70,6 +70,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/_readiness", get(readiness_handler))
         // Nostr HTTP bridge (NIP-98 auth)
         .route("/events", post(api::bridge::submit_event))
+        .route(
+            "/api/managed-agents/aggregate",
+            post(api::managed_agents::submit_aggregate),
+        )
         .route("/query", post(api::bridge::query_events))
         .route("/count", post(api::bridge::count_events))
         .route(

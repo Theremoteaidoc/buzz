@@ -41,6 +41,10 @@ pub enum DbError {
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
 
+    /// A private managed-agent compare-and-swap conflicted with current authority.
+    #[error("managed-agent conflict: {0}")]
+    ManagedAgentConflict(String),
+
     /// A value in the database is malformed or unexpected.
     #[error("invalid data: {0}")]
     InvalidData(String),
