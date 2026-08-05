@@ -109,7 +109,6 @@ type AgentDefinitionDialogProps = {
   ) => Promise<unknown>;
   /** Publishes saved changes when the edited agent is shared in the catalog. */
   publishCatalogUpdatesOnSave?: boolean;
-  /** Rendered below the form fields in create mode only ("Where to run"). */
   createRunSection?: React.ReactNode;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
   createSubmitBlocked?: boolean;
@@ -963,8 +962,6 @@ export function AgentDefinitionDialog({
               open={isAddHarnessOpen}
             />
 
-            {isCreateMode ? createRunSection : null}
-
             <div className="space-y-3">
               <button
                 aria-expanded={showAdvancedFields}
@@ -1002,6 +999,9 @@ export function AgentDefinitionDialog({
                     transition={advancedFieldsTransition}
                   >
                     <PersonaAdvancedFields
+                      afterRespondTo={
+                        isCreateMode ? createRunSection : undefined
+                      }
                       behaviorDraft={behaviorDraft}
                       disabled={isPending}
                       envVars={envVars}

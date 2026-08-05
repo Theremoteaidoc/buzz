@@ -1,5 +1,26 @@
 import { cn } from "@/shared/lib/cn";
 
+type ComposerDockGlassBackdropProps = {
+  className?: string;
+  testId?: string;
+};
+
+export function ComposerDockGlassBackdrop({
+  className,
+  testId,
+}: ComposerDockGlassBackdropProps) {
+  return (
+    <div
+      aria-hidden="true"
+      className={cn(
+        "pointer-events-none backdrop-blur-md dark:backdrop-blur-xl",
+        className,
+      )}
+      data-testid={testId}
+    />
+  );
+}
+
 type ComposerDockBackdropProps = {
   gutterClassName: string;
 };
@@ -21,7 +42,7 @@ export function ComposerDockBackdrop({
         )}
         data-testid="composer-dock-backdrop"
       >
-        <div className="h-full w-full rounded-2xl backdrop-blur-md dark:backdrop-blur-xl" />
+        <ComposerDockGlassBackdrop className="h-full w-full rounded-2xl" />
       </div>
       <div
         aria-hidden="true"

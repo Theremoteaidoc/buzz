@@ -63,7 +63,28 @@ async function probeInvocations(page: Page): Promise<number> {
   );
 }
 
-/** Open the create-agent dialog and select the mocked provider in "Run on". */
+async function selectRunOnOption(
+  page: Page,
+  dialog: import("@playwright/test").Locator,
+  optionName: string,
+) {
+  const trigger = dialog.locator("#agent-run-on");
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await trigger.press("Enter");
+
+  const option = page.getByRole("menuitemradio", {
+    exact: true,
+    name: optionName,
+  });
+  await expect(option).toBeVisible();
+  // The shared PersonaDropdownField supports keyboard selection. Using it here
+  // avoids racing the menu's open animation when this test changes locations
+  // repeatedly.
+  await option.press("Enter");
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+}
+
+/** Open Advanced in the create-agent dialog and select the mocked provider. */
 async function openCreateDialogOnProvider(page: Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-agents-view").click();
@@ -71,7 +92,22 @@ async function openCreateDialogOnProvider(page: Page) {
   await page.getByRole("menuitem", { name: "Create agent" }).click();
   const dialog = page.getByTestId("persona-dialog");
   await expect(dialog).toBeVisible({ timeout: 10_000 });
-  await dialog.locator("#agent-run-on").selectOption(PROVIDER.id);
+  const advanced = dialog.getByRole("button", {
+    name: "Advanced",
+    exact: true,
+  });
+  await expect(advanced).toHaveAttribute("aria-expanded", "false");
+  await expect(dialog.locator("#agent-run-on")).toHaveCount(0);
+  await advanced.click();
+  await expect(advanced).toHaveAttribute("aria-expanded", "true");
+  const respondTo = dialog.getByTestId("agent-respond-to");
+  const runOn = dialog.locator("#agent-run-on");
+  await expect(respondTo).toBeVisible();
+  await expect(runOn).toBeVisible();
+  expect(await respondTo.evaluate((element) => element.offsetTop)).toBeLessThan(
+    await runOn.evaluate((element) => element.offsetTop),
+  );
+  await selectRunOnOption(page, dialog, PROVIDER.id);
   return dialog;
 }
 
@@ -141,10 +177,10 @@ test("provider → local → provider re-probes and resets the config", async ({
   await expect(contextField).toBeVisible({ timeout: 10_000 });
   await contextField.fill("stale-value");
 
-  await dialog.locator("#agent-run-on").selectOption("local");
+  await selectRunOnOption(page, dialog, "This computer");
   await expect(contextField).toHaveCount(0);
 
-  await dialog.locator("#agent-run-on").selectOption(PROVIDER.id);
+  await selectRunOnOption(page, dialog, PROVIDER.id);
   await expect(dialog.locator("#provider-cfg-context")).toBeVisible({
     timeout: 10_000,
   });
