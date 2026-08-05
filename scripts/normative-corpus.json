@@ -1611,5 +1611,26 @@
       "normalization_policy": "none",
       "registry_label": null
     }
+  },
+  {
+    "id": "dbv2-gpt-doubled-separator",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-gpt--5",
+    "_note": "Doubled separator in model id. gpt-version-segment must split on runs of non-alphanumeric (collapsing), so 'gpt--5' -> ['gpt','5'] in both TS and Rust. 'gpt' is a short alpha token; next segment '5' starts with a digit -> gpt rule match -> openai-responses. Pins the Rust/TS segment-array equivalence under consecutive delimiters.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "openai-responses",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
   }
 ]

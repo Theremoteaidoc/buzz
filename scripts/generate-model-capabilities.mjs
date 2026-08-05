@@ -1240,7 +1240,7 @@ fn gpt5_base_matches_rs(model: &str, token: &str) -> bool {
 /// OR the next segment after it starts with a digit). Prevents "gpt-neox-20b" from matching
 /// "gpt" because "neox" starts with a letter, while "gpt-5.5" matches because next seg "5" is digit.
 fn gpt_version_segment_matches_rs(model: &str, token: &str) -> bool {
-    let segs: Vec<&str> = model.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+    let segs: Vec<&str> = model.split(|c: char| !c.is_ascii_alphanumeric()).filter(|s| !s.is_empty()).collect();
     for (i, seg) in segs.iter().enumerate() {
         if *seg == token {
             // Dashless numeric form (e.g. "gpt5"): token length > 3 or starts with digit
