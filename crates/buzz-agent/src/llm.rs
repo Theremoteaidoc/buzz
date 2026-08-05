@@ -1736,14 +1736,26 @@ fn is_retryable_transport_error(e: &reqwest::Error) -> bool {
 /// reqwest's `Display` for a `read_timeout` fire is the opaque
 /// `"error sending request for url (...)"` — the same text as every other
 /// pre-response failure — because the HTTP layer lumps them together.
-/// When the error is a timeout we replace that string with a message that
-/// names the actual cause, making it immediately obvious in logs that the
-/// problem is a long-running server-side generation, not a network fault.
+/// We replace that string with a factual message that names which kind of
+/// timeout fired, making it immediately obvious in logs whether the client
+/// never connected or whether the server stopped sending bytes.
 fn classify_transport_error(e: &reqwest::Error) -> String {
     if e.is_timeout() {
-        "read timeout (no response bytes — likely long generation/thinking; \
-         consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
-            .to_owned()
+        if e.is_connect() {
+            // Connect-phase timeout: the TCP/TLS handshake didn't complete in
+            // time.  This is a genuine network/reachability problem, not a
+            // slow generation.
+            "connect timeout: no connection established within the configured \
+             connect timeout"
+                .to_owned()
+        } else {
+            // Read timeout: the connection succeeded but no response bytes
+            // arrived within the configured read timeout
+            // (BUZZ_AGENT_LLM_TIMEOUT_SECS).
+            "read timeout: no response bytes received within the configured \
+             read timeout (consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
+                .to_owned()
+        }
     } else {
         format!("transport: {e}")
     }
@@ -1752,14 +1764,15 @@ fn classify_transport_error(e: &reqwest::Error) -> String {
 /// Produce a human-readable description of an error that occurred while
 /// reading response body chunks (`resp.chunk()`).
 ///
-/// A timeout here (the server sent headers but then went silent mid-body)
-/// gets the same informative message as a pre-response timeout.  Any other
-/// body-decode failure preserves the `"body read: ..."` prefix expected by
-/// callers and existing tests.
+/// A timeout here means the server sent headers and at least one body chunk
+/// but then went silent mid-body.  Any other body-decode failure preserves
+/// the `"body read: ..."` prefix expected by callers and existing tests.
 fn classify_body_read_error(e: &reqwest::Error) -> String {
     if e.is_timeout() {
-        "read timeout (no response bytes — likely long generation/thinking; \
-         consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
+        // Headers (and possibly partial body) arrived but the stream then
+        // stalled past the read timeout.
+        "read timeout: no further response bytes received within the configured \
+         read timeout (consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
             .to_owned()
     } else {
         format!("body read: {e}")
@@ -4491,21 +4504,21 @@ mod tests {
 
     // ---- classify_transport_error -------------------------------------------
 
-    /// A timeout error must produce a message that names the cause and
-    /// references the config knob — not the opaque reqwest "error sending
-    /// request" string that makes the log unreadable.
+    /// A read-timeout error must produce a factual message that names the
+    /// timeout and references the config knob — not the opaque reqwest "error
+    /// sending request" string.  It must NOT speculate about the cause.
     ///
     /// We build a synthetic `reqwest::Error` by timing out a real loopback
     /// connection; this is the only public way to construct one for test.
     #[tokio::test]
-    async fn classify_transport_error_timeout_names_cause() {
+    async fn classify_transport_error_read_timeout_names_cause() {
         use tokio::net::TcpListener;
 
         // Bind a port and never accept — client times out waiting for bytes.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         // Keep the listener alive for the duration so the TCP connect succeeds
-        // (connect success + read silence = timeout, not connection refused).
+        // (connect success + read silence = read timeout, not connection refused).
         let _listener = listener;
 
         let client = reqwest::Client::builder()
@@ -4520,19 +4533,70 @@ mod tests {
             .expect_err("must time out");
 
         assert!(err.is_timeout(), "precondition: reqwest reports is_timeout");
+        assert!(
+            !err.is_connect(),
+            "precondition: read timeout must not set is_connect"
+        );
 
         let msg = classify_transport_error(&err);
         assert!(
-            msg.contains("read timeout"),
-            "timeout error must say 'read timeout': {msg}"
+            msg.starts_with("read timeout:"),
+            "read timeout must start with 'read timeout:': {msg}"
         );
         assert!(
             msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
-            "timeout error must name the config knob: {msg}"
+            "read timeout must name the config knob: {msg}"
         );
         assert!(
             !msg.contains("error sending request"),
-            "timeout error must not use the opaque reqwest string: {msg}"
+            "read timeout must not use the opaque reqwest string: {msg}"
+        );
+        assert!(
+            !msg.contains("generation") && !msg.contains("thinking"),
+            "read timeout must not speculate about the cause: {msg}"
+        );
+    }
+
+    /// A connect-timeout error must produce a connect-flavored message, never
+    /// the read-timeout text.  reqwest sets both `is_timeout()` and
+    /// `is_connect()` for a connect-phase timeout.
+    #[tokio::test]
+    async fn classify_transport_error_connect_timeout_names_connect() {
+        // 203.0.113.0/24 is TEST-NET-3 (RFC 5737) — routable but unassigned,
+        // so a TCP SYN into it will be blackholed and the connect will time out
+        // (no RST arrives, unlike a refused connection).
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_millis(50))
+            .build()
+            .unwrap();
+
+        let err = client
+            .get("http://203.0.113.1/")
+            .send()
+            .await
+            .expect_err("must time out connecting");
+
+        assert!(
+            err.is_timeout(),
+            "precondition: reqwest reports is_timeout: {err}"
+        );
+        assert!(
+            err.is_connect(),
+            "precondition: reqwest reports is_connect for connect-phase timeout: {err}"
+        );
+
+        let msg = classify_transport_error(&err);
+        assert!(
+            msg.starts_with("connect timeout:"),
+            "connect timeout must start with 'connect timeout:': {msg}"
+        );
+        assert!(
+            !msg.contains("read timeout"),
+            "connect timeout must not say 'read timeout': {msg}"
+        );
+        assert!(
+            !msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            "connect timeout must not reference the read-timeout config knob: {msg}"
         );
     }
 
