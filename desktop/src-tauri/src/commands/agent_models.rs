@@ -940,7 +940,7 @@ pub async fn update_managed_agent(
                         let conn = crate::managed_agents::retention::open_retention_db(
                             &scope.db_path,
                         )?;
-                        if !crate::managed_agents::retention::mark_managed_agent_aggregate_synced(
+                        if !crate::managed_agents::retention::retire_managed_agent_aggregate(
                             &conn,
                             &pending.owner_pubkey,
                             &pending.agent_pubkey,

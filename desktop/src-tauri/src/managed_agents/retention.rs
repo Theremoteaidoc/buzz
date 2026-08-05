@@ -131,6 +131,24 @@ pub struct RetainedManagedAgentAggregate {
     pub local_authority_applied: bool,
 }
 
+pub fn retire_managed_agent_aggregate(
+    conn: &Connection,
+    owner_pubkey: &str,
+    agent_pubkey: &str,
+    generation: u64,
+    private_event_id: &str,
+) -> Result<bool, String> {
+    let changed = conn
+        .execute(
+            "DELETE FROM managed_agent_aggregates
+              WHERE owner_pubkey = ?1 AND agent_pubkey = ?2
+                AND generation = ?3 AND private_event_id = ?4 AND pending_sync = 1",
+            params![owner_pubkey, agent_pubkey, generation as i64, private_event_id],
+        )
+        .map_err(|error| format!("failed to retire managed-agent aggregate: {error}"))?;
+    Ok(changed == 1)
+}
+
 pub fn seed_confirmed_managed_agent_aggregate(
     conn: &Connection,
     aggregate: &RetainedManagedAgentAggregate,
