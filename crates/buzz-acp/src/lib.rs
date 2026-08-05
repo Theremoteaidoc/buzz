@@ -14,7 +14,7 @@ mod usage;
 
 pub use usage::TurnUsage;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -361,50 +361,120 @@ async fn check_sibling_via_profile(
     false
 }
 
-const OBSERVER_PUBLISH_INTERVAL: Duration = Duration::from_millis(167);
-const OBSERVER_PUBLISH_LIMIT_PER_MINUTE: usize = 90;
+/// Observer frames are published once per tick; everything that accumulated in
+/// between ships as a single batched frame per channel. One update per second
+/// is smooth enough for a human watching the session viewer, and the batch
+/// keeps a tool-heavy turn (hundreds of events) from either flooding the relay
+/// or backing up behind a per-event pacer. This replaces the old per-frame
+/// pacer (167ms interval + 90/min rolling cap): the tick IS the pacer, and at
+/// one flush per second a rolling-minute cap is unreachable.
+const OBSERVER_PUBLISH_TICK: Duration = Duration::from_secs(1);
 
-struct ObserverPublishPacer {
-    next_publish: tokio::time::Instant,
-    published: VecDeque<tokio::time::Instant>,
+/// Observer event kind for a batch envelope wrapping multiple events.
+///
+/// The payload is `{"events": [<ObserverEvent>, ...]}` with every inner event
+/// carrying its own `seq`/`timestamp`, so consumers process inner events
+/// exactly as they would unbatched ones. Single pending events are published
+/// unwrapped, so the envelope only appears when there is something to batch.
+const OBSERVER_BATCH_KIND: &str = "batch";
+
+/// Collects observer events between publish ticks.
+///
+/// Chunk-type events ride the [`ObserverChunkCoalescer`]; everything else is
+/// appended in arrival order, force-flushing pending chunks first — the same
+/// ordering rule the pre-batching publisher enforced, so merged chunk text can
+/// never leapfrog a tool call that arrived mid-stream.
+#[derive(Default)]
+struct ObserverBatcher {
+    coalescer: ObserverChunkCoalescer,
+    ready: Vec<observer::ObserverEvent>,
 }
 
-impl ObserverPublishPacer {
-    fn new() -> Self {
-        Self {
-            // No initial burst: even the first snapshot frame waits for its slot.
-            next_publish: tokio::time::Instant::now() + OBSERVER_PUBLISH_INTERVAL,
-            published: VecDeque::with_capacity(OBSERVER_PUBLISH_LIMIT_PER_MINUTE),
+impl ObserverBatcher {
+    fn ingest(&mut self, event: observer::ObserverEvent) {
+        // ObserverChunkCoalescer::ingest returns immediately-publishable events
+        // (force-flushed pending chunks + non-chunk passthrough, or a pending
+        // set displaced by the 60KB pre-flush); they join the ready queue in
+        // the order the coalescer emitted them.
+        self.ready.extend(self.coalescer.ingest(event));
+    }
+
+    /// Drain everything pending — coalesced chunks included — in order.
+    fn drain(&mut self) -> Vec<observer::ObserverEvent> {
+        self.ready.extend(self.coalescer.flush());
+        std::mem::take(&mut self.ready)
+    }
+}
+
+/// Pack drained events into publishable frames: one batch envelope per
+/// channel (splitting when a batch would exceed the plaintext budget), with
+/// singletons left unwrapped.
+///
+/// Grouping by `channel_id` is load-bearing: the desktop archive indexes a
+/// frame under its decrypted top-level `channelId`, so a frame must never mix
+/// events from different channels. Groups preserve first-seen channel order
+/// and arrival order within each channel.
+fn batch_observer_events(events: Vec<observer::ObserverEvent>) -> Vec<observer::ObserverEvent> {
+    let mut groups: Vec<(Option<String>, Vec<observer::ObserverEvent>)> = Vec::new();
+    for mut event in events {
+        // Pre-trim each inner event so one oversized leaf cannot force every
+        // batch it touches into whole-envelope elision downstream.
+        fit_observer_event_to_budget(&mut event);
+        match groups.iter_mut().find(|(key, _)| *key == event.channel_id) {
+            Some((_, group)) => group.push(event),
+            None => groups.push((event.channel_id.clone(), vec![event])),
         }
     }
 
-    async fn wait(&mut self) {
-        loop {
-            let now = tokio::time::Instant::now();
-            while self
-                .published
-                .front()
-                .is_some_and(|sent| now.duration_since(*sent) >= Duration::from_secs(60))
+    let mut frames = Vec::new();
+    for (_, group) in groups {
+        let mut pending: Vec<observer::ObserverEvent> = Vec::new();
+        for event in group {
+            pending.push(event);
+            if serialized_len(&batch_envelope(&pending)) > OBSERVER_MAX_PLAINTEXT_LEN
+                && pending.len() > 1
             {
-                self.published.pop_front();
+                let overflow = pending.pop().expect("len > 1");
+                frames.push(seal_batch(pending));
+                pending = vec![overflow];
             }
-
-            let minute_slot = self.published.front().and_then(|sent| {
-                (self.published.len() >= OBSERVER_PUBLISH_LIMIT_PER_MINUTE)
-                    .then_some(*sent + Duration::from_secs(60))
-            });
-            let publish_at =
-                minute_slot.map_or(self.next_publish, |slot| slot.max(self.next_publish));
-            if publish_at > now {
-                tokio::time::sleep_until(publish_at).await;
-                continue;
-            }
-
-            let published_at = tokio::time::Instant::now();
-            self.published.push_back(published_at);
-            self.next_publish = published_at + OBSERVER_PUBLISH_INTERVAL;
-            return;
         }
+        if !pending.is_empty() {
+            frames.push(seal_batch(pending));
+        }
+    }
+    frames
+}
+
+/// A single event ships unwrapped; two or more get the batch envelope.
+fn seal_batch(mut events: Vec<observer::ObserverEvent>) -> observer::ObserverEvent {
+    if events.len() == 1 {
+        return events.pop().expect("len == 1");
+    }
+    batch_envelope(&events)
+}
+
+/// Build the batch envelope for a set of same-channel events.
+///
+/// Envelope metadata mirrors the LAST inner event — the same convention the
+/// chunk coalescer uses for merged chunks — so `(timestamp, seq)` ordering and
+/// the desktop's latest-live-session tracking see the newest state.
+fn batch_envelope(events: &[observer::ObserverEvent]) -> observer::ObserverEvent {
+    let last = events
+        .last()
+        .expect("batch envelope needs at least 1 event");
+    observer::ObserverEvent {
+        seq: last.seq,
+        timestamp: last.timestamp.clone(),
+        kind: OBSERVER_BATCH_KIND.to_string(),
+        agent_index: last.agent_index,
+        channel_id: last.channel_id.clone(),
+        session_id: last.session_id.clone(),
+        turn_id: last.turn_id.clone(),
+        started_at: last.started_at.clone(),
+        payload: serde_json::json!({
+            "events": serde_json::to_value(events).unwrap_or_default(),
+        }),
     }
 }
 
@@ -445,26 +515,17 @@ async fn run_relay_observer_publisher(
     owner_pubkey_hex: String,
     owner_pubkey: PublicKey,
 ) {
-    let mut coalescer = ObserverChunkCoalescer::default();
-    let mut pacer = ObserverPublishPacer::new();
+    let mut batcher = ObserverBatcher::default();
     let max_snapshot_seq = snapshot.iter().map(|event| event.seq).max().unwrap_or(0);
     for event in snapshot {
-        for event in coalescer.ingest(event) {
-            publish_relay_observer_event(
-                &publisher,
-                &keys,
-                &agent_pubkey_hex,
-                &owner_pubkey_hex,
-                &owner_pubkey,
-                &mut pacer,
-                event,
-            )
-            .await;
-        }
+        batcher.ingest(event);
     }
 
-    let mut flush_interval = tokio::time::interval(std::time::Duration::from_millis(500));
-    flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // One publish per tick: drain the batcher and ship the accumulated events
+    // as (at most a few) batched frames. The snapshot drains on the first tick,
+    // so startup pays the same 1s latency as steady state instead of bursting.
+    let mut publish_tick = tokio::time::interval(OBSERVER_PUBLISH_TICK);
+    publish_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             result = rx.recv() => {
@@ -475,39 +536,28 @@ async fn run_relay_observer_publisher(
                         if event.seq <= max_snapshot_seq {
                             continue;
                         }
-                        for event in coalescer.ingest(event) {
-                            publish_relay_observer_event(
-                                &publisher, &keys, &agent_pubkey_hex,
-                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
-                            ).await;
-                        }
+                        batcher.ingest(event);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                        for event in coalescer.flush() {
-                            publish_relay_observer_event(
-                                &publisher, &keys, &agent_pubkey_hex,
-                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
-                            ).await;
-                        }
                         tracing::warn!(dropped = count, "relay observer publisher lagged");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        for event in coalescer.flush() {
+                        // Final drain so shutdown never strands buffered events.
+                        for event in batch_observer_events(batcher.drain()) {
                             publish_relay_observer_event(
                                 &publisher, &keys, &agent_pubkey_hex,
-                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                                &owner_pubkey_hex, &owner_pubkey, event,
                             ).await;
                         }
                         break;
                     }
                 }
             }
-            _ = flush_interval.tick() => {
-                // Periodic flush ensures live streaming even during continuous chunk delivery.
-                for event in coalescer.flush() {
+            _ = publish_tick.tick() => {
+                for event in batch_observer_events(batcher.drain()) {
                     publish_relay_observer_event(
                         &publisher, &keys, &agent_pubkey_hex,
-                        &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                        &owner_pubkey_hex, &owner_pubkey, event,
                     ).await;
                 }
             }
@@ -793,10 +843,8 @@ async fn publish_relay_observer_event(
     agent_pubkey_hex: &str,
     owner_pubkey_hex: &str,
     owner_pubkey: &PublicKey,
-    pacer: &mut ObserverPublishPacer,
     mut event: observer::ObserverEvent,
 ) {
-    pacer.wait().await;
     // Trim oversized frames to fit the plaintext cap rather than letting
     // encrypt_observer_payload reject and drop them whole (silent telemetry loss).
     fit_observer_event_to_budget(&mut event);
@@ -4939,12 +4987,21 @@ mod observer_snapshot_race_tests {
 
         // The run loop has exited, dropping the publisher; drain the forwarded
         // events until the channel closes (deterministic — no try_recv race
-        // with the test_pair forwarding task).
+        // with the test_pair forwarding task). With per-tick batching the three
+        // events arrive inside batch envelopes (or unwrapped when a drain held
+        // exactly one event); unwrap both shapes.
         let mut markers = Vec::new();
         while let Some(event) = published_rx.recv().await {
             let payload: serde_json::Value =
                 decrypt_observer_payload(&owner_keys, &event).expect("decrypt published frame");
-            markers.push(payload["payload"]["marker"].as_str().unwrap().to_string());
+            match payload["payload"]["events"].as_array() {
+                Some(inner) => markers.extend(
+                    inner
+                        .iter()
+                        .map(|e| e["payload"]["marker"].as_str().unwrap().to_string()),
+                ),
+                None => markers.push(payload["payload"]["marker"].as_str().unwrap().to_string()),
+            }
         }
         assert_eq!(
             markers,
@@ -4955,36 +5012,155 @@ mod observer_snapshot_race_tests {
 }
 
 #[cfg(test)]
-mod observer_publish_pacer_tests {
+mod observer_batcher_tests {
     use super::*;
 
-    #[tokio::test(start_paused = true)]
-    async fn starts_without_a_burst_and_spaces_frames() {
-        let started = tokio::time::Instant::now();
-        let mut pacer = ObserverPublishPacer::new();
-
-        pacer.wait().await;
-        let first = tokio::time::Instant::now();
-        pacer.wait().await;
-        let second = tokio::time::Instant::now();
-
-        assert_eq!(first.duration_since(started), OBSERVER_PUBLISH_INTERVAL);
-        assert_eq!(second.duration_since(first), OBSERVER_PUBLISH_INTERVAL);
+    fn event(seq: u64, kind: &str, channel: Option<&str>) -> observer::ObserverEvent {
+        observer::ObserverEvent {
+            seq,
+            timestamp: format!("2026-04-29T04:00:{:02}Z", seq.min(59)),
+            kind: kind.to_string(),
+            agent_index: Some(0),
+            channel_id: channel.map(ToOwned::to_owned),
+            session_id: Some("session-1".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            started_at: None,
+            payload: serde_json::json!({ "seq": seq }),
+        }
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn limits_frames_in_each_rolling_minute() {
-        let mut pacer = ObserverPublishPacer::new();
-        pacer.wait().await;
-        let first = tokio::time::Instant::now();
-        for _ in 1..OBSERVER_PUBLISH_LIMIT_PER_MINUTE {
-            pacer.wait().await;
+    /// Two or more pending events for one channel ship as a single batch
+    /// envelope whose payload carries every inner event in arrival order.
+    #[test]
+    fn multiple_events_ship_as_one_envelope_in_order() {
+        let frames = batch_observer_events(vec![
+            event(1, "turn_started", Some("chan-a")),
+            event(2, "acp_read", Some("chan-a")),
+            event(3, "acp_write", Some("chan-a")),
+        ]);
+
+        assert_eq!(frames.len(), 1, "one channel, one frame");
+        let frame = &frames[0];
+        assert_eq!(frame.kind, OBSERVER_BATCH_KIND);
+        assert_eq!(frame.seq, 3, "envelope mirrors the last inner event");
+        let inner = frame.payload["events"].as_array().expect("events array");
+        assert_eq!(
+            inner
+                .iter()
+                .map(|e| e["seq"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [1, 2, 3],
+            "inner events preserve arrival order"
+        );
+        assert_eq!(inner[1]["kind"], "acp_read", "inner events keep their kind");
+    }
+
+    /// A single pending event is published unwrapped — no envelope, so
+    /// consumers that predate batching still understand quiet periods.
+    #[test]
+    fn a_single_event_stays_unwrapped() {
+        let frames = batch_observer_events(vec![event(7, "turn_started", Some("chan-a"))]);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].kind, "turn_started");
+        assert_eq!(frames[0].seq, 7);
+    }
+
+    /// Events from different channels never share an envelope: the desktop
+    /// archive indexes a frame under its top-level `channelId`, so a mixed
+    /// batch would mis-file every foreign event. First-seen channel order and
+    /// per-channel arrival order are both preserved.
+    #[test]
+    fn batches_never_mix_channels() {
+        let frames = batch_observer_events(vec![
+            event(1, "acp_read", Some("chan-a")),
+            event(2, "acp_read", Some("chan-b")),
+            event(3, "acp_write", Some("chan-a")),
+            event(4, "acp_read", None),
+        ]);
+
+        assert_eq!(
+            frames.len(),
+            3,
+            "chan-a batch, chan-b singleton, None singleton"
+        );
+        assert_eq!(frames[0].kind, OBSERVER_BATCH_KIND);
+        assert_eq!(frames[0].channel_id.as_deref(), Some("chan-a"));
+        let inner = frames[0].payload["events"].as_array().unwrap();
+        assert_eq!(inner.len(), 2);
+        assert_eq!(frames[1].channel_id.as_deref(), Some("chan-b"));
+        assert_eq!(frames[1].kind, "acp_read", "singleton unwrapped");
+        assert_eq!(frames[2].channel_id, None);
+        assert_eq!(frames[2].seq, 4);
+    }
+
+    /// A batch that would exceed the plaintext budget splits into multiple
+    /// envelopes, each independently under the cap, with no event lost.
+    #[test]
+    fn oversized_batches_split_under_the_plaintext_cap() {
+        let big_text = "x".repeat(30_000);
+        let events: Vec<_> = (1..=6)
+            .map(|seq| {
+                let mut e = event(seq, "acp_read", Some("chan-a"));
+                e.payload = serde_json::json!({ "seq": seq, "text": big_text });
+                e
+            })
+            .collect();
+
+        let frames = batch_observer_events(events);
+        assert!(
+            frames.len() > 1,
+            "six 30KB events cannot fit one 64KB frame"
+        );
+        let mut seen = Vec::new();
+        for frame in &frames {
+            assert!(
+                serialized_len(frame) <= OBSERVER_MAX_PLAINTEXT_LEN,
+                "every emitted frame must fit the plaintext cap"
+            );
+            match frame.payload.get("events").and_then(|v| v.as_array()) {
+                Some(inner) => {
+                    seen.extend(inner.iter().map(|e| e["seq"].as_u64().unwrap()));
+                }
+                None => seen.push(frame.seq),
+            }
+        }
+        assert_eq!(
+            seen,
+            [1, 2, 3, 4, 5, 6],
+            "no event lost or reordered by splitting"
+        );
+    }
+
+    /// The batcher preserves the coalescer's ordering rule: a non-chunk event
+    /// force-flushes pending chunk text ahead of itself, so merged chunks can
+    /// never leapfrog a tool call that arrived after them.
+    #[test]
+    fn non_chunk_events_flush_pending_chunks_ahead_of_themselves() {
+        fn chunk(seq: u64, text: &str) -> observer::ObserverEvent {
+            let mut e = event(seq, "acp_read", Some("chan-a"));
+            e.payload = serde_json::json!({
+                "params": { "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "messageId": "m1",
+                    "content": { "text": text },
+                }}
+            });
+            e
         }
 
-        pacer.wait().await;
-        let ninety_first = tokio::time::Instant::now();
+        let mut batcher = ObserverBatcher::default();
+        batcher.ingest(chunk(1, "hello "));
+        batcher.ingest(chunk(2, "world"));
+        batcher.ingest(event(3, "tool_call", Some("chan-a")));
+        let drained = batcher.drain();
 
-        assert_eq!(ninety_first.duration_since(first), Duration::from_secs(60));
+        assert_eq!(drained.len(), 2, "two chunks coalesce into one event");
+        assert_eq!(
+            drained[0].payload["params"]["update"]["content"]["text"], "hello world",
+            "chunk text merged before the tool call"
+        );
+        assert_eq!(drained[1].kind, "tool_call");
+        assert!(drained[0].seq < drained[1].seq);
     }
 }
 

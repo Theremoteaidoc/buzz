@@ -106,9 +106,10 @@ const REQ_PACING_INTERVAL: Duration = Duration::from_millis(125);
 /// blocked for more than one REQ's worth of I/O between drain ticks.
 const DRAIN_BUDGET_PER_ITER: usize = 1;
 /// Maximum observer telemetry frames parked while the rate-limit gate is armed
-/// (or the socket is down). The upstream pacer feeds at most ~6 frames/s, so
-/// this covers ~40 s of gating; beyond that the oldest frames are dropped with
-/// visible accounting (`gated_observer_dropped`).
+/// (or the socket is down). The upstream publisher ships at most ~1 frame/s
+/// per active channel (one batched frame per publish tick), so this covers
+/// minutes of gating even with several concurrent channels; beyond that the
+/// oldest frames are dropped with visible accounting (`gated_observer_dropped`).
 const GATED_OBSERVER_QUEUE_CAP: usize = 256;
 
 use std::time::Instant;
