@@ -285,6 +285,18 @@ pub async fn apply_workspace(
                 {
                     eprintln!("buzz-desktop: PMA migration flush failed: {error}");
                 }
+                if let Err(error) =
+                    crate::managed_agents::migration::activation::flush_pending_deletions(
+                        &migration_app,
+                        &migration_client,
+                        &migration_relay_api,
+                        &scope.owner_keys,
+                        &scope.db_path,
+                    )
+                    .await
+                {
+                    eprintln!("buzz-desktop: PMA deletion flush failed: {error}");
+                }
             });
         }
         Err(error) => {

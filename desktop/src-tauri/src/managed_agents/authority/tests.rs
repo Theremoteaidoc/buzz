@@ -460,3 +460,61 @@ fn impossible_authority_states_are_unrepresentable() {
         "RelayAuthoritative without evidence must fail to deserialize",
     );
 }
+
+#[test]
+fn deleting_authority_roundtrips_with_evidence() {
+    // The mid-deletion state structurally carries the head evidence needed to
+    // (re)sign the tombstone and to compare-and-clear. It is relay-canonical
+    // (reconcile must NOT republish) and reports deleting, but is NOT the
+    // promoted authoritative state.
+    let authority = RelayAuthority::deleting(RelayAuthorityEvidence {
+        generation: 9,
+        private_event_id: "priorhead".to_string(),
+    });
+    let json = serde_json::to_string(&authority).unwrap();
+    let back: RelayAuthority = serde_json::from_str(&json).unwrap();
+    assert_eq!(authority, back);
+    assert!(back.is_deleting());
+    assert!(back.is_relay_canonical());
+    assert!(
+        !back.is_relay_authoritative(),
+        "Deleting is canonical but not the promoted authoritative state",
+    );
+    assert_eq!(back.evidence().unwrap().generation, 9);
+    assert_eq!(back.evidence().unwrap().private_event_id, "priorhead");
+
+    // Exact persisted shape: internally tagged on `authority`, evidence beside.
+    assert_eq!(
+        serde_json::to_value(&authority).unwrap(),
+        serde_json::json!({
+            "authority": "deleting",
+            "evidence": { "generation": 9, "private_event_id": "priorhead" },
+        }),
+    );
+}
+
+#[test]
+fn deleting_authority_without_evidence_fails_to_deserialize() {
+    // Like RelayAuthoritative, a Deleting marker lacking a verified head is a
+    // hard error — a mid-deletion record must always carry the evidence needed
+    // to re-sign the tombstone and compare-and-clear.
+    let deleting_no_evidence = serde_json::json!({ "authority": "deleting" });
+    assert!(
+        serde_json::from_value::<RelayAuthority>(deleting_no_evidence).is_err(),
+        "Deleting without evidence must fail to deserialize",
+    );
+}
+
+#[test]
+fn relay_canonical_covers_authoritative_but_legacy_is_neither() {
+    // Boot reconcile gates republish on is_relay_canonical: true for both
+    // promoted and mid-deletion records, false for legacy.
+    let authoritative = RelayAuthority::relay_authoritative(RelayAuthorityEvidence {
+        generation: 1,
+        private_event_id: "h".to_string(),
+    });
+    assert!(authoritative.is_relay_canonical());
+    assert!(!authoritative.is_deleting());
+    assert!(!RelayAuthority::legacy().is_relay_canonical());
+    assert!(!RelayAuthority::legacy().is_deleting());
+}

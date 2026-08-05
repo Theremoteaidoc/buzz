@@ -122,6 +122,13 @@ pub struct RetainedManagedAgentAggregate {
     pub request_json: String,
     pub pending_sync: bool,
     pub last_error: Option<String>,
+    /// Durable proof that a verified deletion has already applied the local
+    /// record/key erase for this exact generation. Only ever set on a
+    /// `state = "deleted"` row, immediately before `pending_sync` is cleared,
+    /// so crash-replay can distinguish "our verified deletion erased the
+    /// record" from an unrelated/manual local deletion. Always `false` on a
+    /// freshly retained row.
+    pub local_authority_applied: bool,
 }
 
 /// Insert or idempotently refresh a retained aggregate generation.
@@ -143,6 +150,11 @@ pub fn retain_managed_agent_aggregate(
 
     if !aggregate.pending_sync || aggregate.last_error.is_some() {
         return Err("new managed-agent aggregate must start pending without an error".to_string());
+    }
+    if aggregate.local_authority_applied {
+        return Err(
+            "new managed-agent aggregate must not start with local authority applied".to_string(),
+        );
     }
 
     let tx = conn
@@ -224,7 +236,7 @@ pub fn get_retained_managed_agent_aggregate(
 ) -> Result<Option<RetainedManagedAgentAggregate>, String> {
     conn.query_row(
         "SELECT owner_pubkey, agent_pubkey, generation, private_event_id, state,
-                request_json, pending_sync, last_error
+                request_json, pending_sync, last_error, local_authority_applied
            FROM managed_agent_aggregates
           WHERE owner_pubkey = ?1 AND agent_pubkey = ?2
           ORDER BY generation DESC
@@ -249,7 +261,7 @@ pub fn get_pending_managed_agent_aggregates(
         .prepare(
             "SELECT a.owner_pubkey, a.agent_pubkey, a.generation,
                     a.private_event_id, a.state, a.request_json,
-                    a.pending_sync, a.last_error
+                    a.pending_sync, a.last_error, a.local_authority_applied
                FROM managed_agent_aggregates a
               WHERE a.owner_pubkey = ?1 AND a.pending_sync = 1
                 AND a.generation = (
@@ -286,6 +298,7 @@ fn aggregate_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RetainedManag
         request_json: row.get(5)?,
         pending_sync: row.get::<_, i32>(6)? != 0,
         last_error: row.get(7)?,
+        local_authority_applied: row.get::<_, i32>(8)? != 0,
     })
 }
 
@@ -343,6 +356,42 @@ pub fn record_managed_agent_aggregate_error(
     Ok(changed == 1)
 }
 
+/// Durably record that a verified deletion has applied the local record/key
+/// erase for one exact retained tombstone generation.
+///
+/// Written on the `state = "deleted"` row immediately AFTER the local erase and
+/// BEFORE [`mark_managed_agent_aggregate_synced`] clears the retry. Together
+/// they order the crash-safe deletion seam: erase → mark-applied → clear. On
+/// replay, a set marker (never mere record absence) proves the exact deletion
+/// reached local authority, so the retry may be cleared without re-erasing an
+/// unrelated agent. Returns `true` iff the exact `(owner, agent, generation,
+/// event)` deleted row was updated.
+#[allow(dead_code)] // Consumed by the deletion flush lane.
+pub fn mark_managed_agent_deletion_local_authority_applied(
+    conn: &Connection,
+    owner_pubkey: &str,
+    agent_pubkey: &str,
+    generation: u64,
+    private_event_id: &str,
+) -> Result<bool, String> {
+    let changed = conn
+        .execute(
+            "UPDATE managed_agent_aggregates
+                SET local_authority_applied = 1
+              WHERE owner_pubkey = ?1 AND agent_pubkey = ?2
+                AND generation = ?3 AND private_event_id = ?4
+                AND state = 'deleted'",
+            params![
+                owner_pubkey,
+                agent_pubkey,
+                generation as i64,
+                private_event_id
+            ],
+        )
+        .map_err(|e| format!("failed to mark managed-agent deletion authority applied: {e}"))?;
+    Ok(changed == 1)
+}
+
 /// A retained persona event row.
 #[derive(Debug, Clone)]
 pub struct RetainedEvent {
@@ -392,7 +441,47 @@ pub fn open_retention_db(path: &Path) -> Result<Connection, String> {
     )
     .map_err(|e| format!("failed to create retention table: {e}"))?;
 
+    // Durable terminal-deletion marker: set to 1 the instant a verified deletion
+    // has applied the local record/key erase, BEFORE `pending_sync` is cleared.
+    // Crash-replay uses this — never mere record absence — to prove the exact
+    // deletion reached local authority before it clears the retry. Added via a
+    // guarded ALTER so stores written before this column deserialize as 0.
+    add_column_if_missing(
+        &conn,
+        "managed_agent_aggregates",
+        "local_authority_applied",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+
     Ok(conn)
+}
+
+/// Add `column` to `table` if it is not already present. Idempotent: SQLite has
+/// no `ADD COLUMN IF NOT EXISTS`, so existence is probed via `PRAGMA
+/// table_info` and the `ALTER` is skipped when the column already exists.
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| format!("failed to inspect {table} columns: {e}"))?;
+    let existing: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| format!("failed to read {table} columns: {e}"))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("failed to collect {table} columns: {e}"))?;
+    if existing.iter().any(|name| name == column) {
+        return Ok(());
+    }
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+        [],
+    )
+    .map_err(|e| format!("failed to add {table}.{column}: {e}"))?;
+    Ok(())
 }
 
 fn set_wal_mode(conn: &Connection) -> Result<(), String> {
@@ -816,6 +905,7 @@ mod tests {
             request_json: request_json.to_string(),
             pending_sync: true,
             last_error: None,
+            local_authority_applied: false,
         }
     }
 
@@ -1332,5 +1422,89 @@ mod tests {
             "other-persona",
             &failed
         ));
+    }
+
+    #[test]
+    fn deletion_marker_is_the_terminal_crash_replay_proof() {
+        // Carl's correction: bare record absence must NOT license clearing the
+        // retry. The durable `local_authority_applied` marker is the proof that
+        // THIS exact verified deletion reached local authority.
+        let mut conn = test_db();
+        retain_managed_agent_aggregate(
+            &mut conn,
+            &aggregate(1, "event-1", "active", r#"{"generation":1}"#),
+        )
+        .unwrap();
+        retain_managed_agent_aggregate(
+            &mut conn,
+            &aggregate(2, "event-2", "deleted", r#"{"generation":2}"#),
+        )
+        .unwrap();
+
+        // Freshly retained: marker is unset — absence of the marker means the
+        // flush has not proven erase yet.
+        let row = get_retained_managed_agent_aggregate(&conn, "owner", "agent")
+            .unwrap()
+            .unwrap();
+        assert!(!row.local_authority_applied);
+
+        // A new aggregate can never be born with the marker set.
+        let mut premature = aggregate(3, "event-3", "deleted", r#"{"generation":3}"#);
+        premature.local_authority_applied = true;
+        assert!(retain_managed_agent_aggregate(&mut conn, &premature)
+            .unwrap_err()
+            .contains("must not start with local authority applied"));
+
+        // The marker sets only the EXACT deleted row and only once effectively.
+        assert!(mark_managed_agent_deletion_local_authority_applied(
+            &conn, "owner", "agent", 2, "event-2"
+        )
+        .unwrap());
+        let marked = get_retained_managed_agent_aggregate(&conn, "owner", "agent")
+            .unwrap()
+            .unwrap();
+        assert!(
+            marked.local_authority_applied,
+            "the marker is durable and read back"
+        );
+
+        // A wrong coordinate (generation/event/owner/agent) never sets it.
+        assert!(!mark_managed_agent_deletion_local_authority_applied(
+            &conn,
+            "owner",
+            "agent",
+            2,
+            "wrong-event"
+        )
+        .unwrap());
+        assert!(!mark_managed_agent_deletion_local_authority_applied(
+            &conn,
+            "owner",
+            "other-agent",
+            2,
+            "event-2"
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn deletion_marker_refuses_a_non_deleted_row() {
+        // The marker is a deletion-terminal proof; it must never flip an active
+        // (promotion) row. `mark_managed_agent_deletion_local_authority_applied`
+        // is scoped to state = 'deleted'.
+        let mut conn = test_db();
+        retain_managed_agent_aggregate(
+            &mut conn,
+            &aggregate(1, "event-1", "active", r#"{"generation":1}"#),
+        )
+        .unwrap();
+        assert!(!mark_managed_agent_deletion_local_authority_applied(
+            &conn, "owner", "agent", 1, "event-1"
+        )
+        .unwrap());
+        let row = get_retained_managed_agent_aggregate(&conn, "owner", "agent")
+            .unwrap()
+            .unwrap();
+        assert!(!row.local_authority_applied);
     }
 }

@@ -50,12 +50,12 @@ pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
 }
 
 pub use backend::*;
-// Only `RelayAuthority` is consumed by production code (the record field +
-// its `legacy()` constructor at every call site). The classification API
-// (`classify_field`, `FieldClass`) and `RelayAuthorityEvidence` are exercised
-// solely by `authority`'s own tests via `super::*`, so they need no re-export
-// yet; the not-yet-built migration path will add one when it actually consumes
-// them. No blanket `#[allow(dead_code)]` — unused API stays unexported.
+// `RelayAuthority` (the record field + its `legacy()` constructor) and
+// `RelayAuthorityEvidence` (carried by the delete path's `TombstoneDisposition`
+// and the deletion flush) are consumed by production code. The classification
+// API (`classify_field`, `FieldClass`) is exercised solely by `authority`'s own
+// tests via `super::*`, so it needs no re-export yet. No blanket
+// `#[allow(dead_code)]` — unused API stays unexported.
 pub(crate) use authority::{RelayAuthority, RelayAuthorityEvidence, VersionedBackend};
 pub use discovery::*;
 pub use env_vars::*;

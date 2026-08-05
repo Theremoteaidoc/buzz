@@ -246,6 +246,9 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     ("src/commands/team_snapshot.rs", 1, 1),            // boundary 6
     ("src/commands/personas/snapshot/import.rs", 2, 1), // boundary 7 + its in-file injection-test fixture URL
     ("src/native_websocket.rs", 0, 2),                  // boundary 8 (WS frames; no events URL)
+    // boundary 9: PMA aggregate submit funnel (POSTs to /api/managed-agents/
+    // aggregate, not /events, so 0 events-URL sites + 1 guard call).
+    ("src/managed_agents/migration/driver/mod.rs", 0, 1),
     // Test-only fixtures — no production egress, no guard:
     ("src/relay_admission.rs", 1, 0),
     ("src/archive/mod_tests.rs", 1, 0),
@@ -418,6 +421,7 @@ fn ncryptsec_handling_is_confined_to_allowlisted_files() {
         "src/commands/team_snapshot/tests.rs",
         "src/commands/personas/snapshot/import.rs",
         "src/native_websocket.rs",
+        "src/managed_agents/migration/driver/tests.rs", // boundary 9 injection test
     ];
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

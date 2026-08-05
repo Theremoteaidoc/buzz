@@ -502,3 +502,63 @@ fn tauri_platform_configs_bundle_kubernetes_only_on_supported_hosts() {
         );
     }
 }
+
+// ── Delete-retry tombstone classifier ───────────────────────────────────────
+//
+// Guards the immutable-retention contract: a repeat delete must NEVER rebuild
+// a tombstone at a fresh event id/timestamp. These cover the cascade
+// enqueue-N/save-fail self-heal and the Deleting retry Carl flagged.
+
+#[test]
+fn retry_resumes_when_exact_pending_tombstone_exists_deleting() {
+    // Record already flipped to Deleting, its tombstone pending: idempotent
+    // resume, no rebuild.
+    assert_eq!(
+        classify_tombstone_retry(true, true, true),
+        TombstoneRetry::Resume
+    );
+}
+
+#[test]
+fn retry_resumes_authoritative_after_cascade_enqueue_save_fail() {
+    // Cascade enqueued tombstone N, then the batch authority save failed, so the
+    // record is still RelayAuthoritative but a matching pending tombstone exists.
+    // Retry must resume it, not rebuild (which would drift).
+    assert_eq!(
+        classify_tombstone_retry(true, true, false),
+        TombstoneRetry::Resume
+    );
+}
+
+#[test]
+fn retry_builds_on_first_delete_of_authoritative_record() {
+    // No pending tombstone, record authoritative: the normal first-delete path.
+    assert_eq!(
+        classify_tombstone_retry(false, false, false),
+        TombstoneRetry::Build
+    );
+}
+
+#[test]
+fn retry_fails_closed_for_deleting_record_without_pending_row() {
+    // A Deleting record whose tombstone row is gone is inconsistent — never mint
+    // a fresh one.
+    assert_eq!(
+        classify_tombstone_retry(false, false, true),
+        TombstoneRetry::FailClosed
+    );
+}
+
+#[test]
+fn retry_fails_closed_for_foreign_pending_row() {
+    // A pending row exists but does not match this agent's verified head
+    // (foreign/drifted): refuse to rebuild over it, regardless of authority.
+    assert_eq!(
+        classify_tombstone_retry(true, false, false),
+        TombstoneRetry::FailClosed
+    );
+    assert_eq!(
+        classify_tombstone_retry(true, false, true),
+        TombstoneRetry::FailClosed
+    );
+}

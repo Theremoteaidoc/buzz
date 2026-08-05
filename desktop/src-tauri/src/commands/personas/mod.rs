@@ -213,18 +213,59 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
 
             // ── Phase 3: Commit ─────────────────────────────────────────────
             //
+            // Enqueue-before-erase per cascade agent, mirroring
+            // `delete_managed_agent`. For each agent the authoritative tombstone
+            // is durably retained BEFORE any local destruction:
+            //   * relay-canonical → stays on disk flipped to Deleting; the
+            //     deletion flush erases + archives after verified confirmation.
+            //   * legacy → erased in this lock once its kind:5 tombstone is
+            //     enqueued.
+            // A relay-canonical enqueue failure propagates before anything is
+            // destroyed, so the full cascade retries cleanly. The persona's own
+            // tombstone (kind:30175) is independent, so a persona may leave disk
+            // while its relay-canonical agents are still confirming.
+            let mut erase_pubkeys: Vec<String> = Vec::new();
+            let mut deleting_updates: std::collections::HashMap<
+                String,
+                crate::managed_agents::RelayAuthority,
+            > = std::collections::HashMap::new();
+            for pk in &cascade {
+                let authority = cascade_authorities
+                    .get(pk)
+                    .ok_or_else(|| format!("agent {pk} authority missing"))?;
+                match super::agents::tombstone_managed_agent_pending(&app, &state, pk, authority)? {
+                    super::agents::TombstoneDisposition::DeferErase { evidence } => {
+                        deleting_updates.insert(
+                            pk.clone(),
+                            crate::managed_agents::RelayAuthority::deleting(evidence),
+                        );
+                    }
+                    super::agents::TombstoneDisposition::EraseNow => {
+                        erase_pubkeys.push(pk.clone());
+                    }
+                }
+            }
+
             // Disk-authoritative writes first, side effects strictly after.
-            // commit_cascade_agents is an injectable seam so unit tests can
-            // verify retry-safety: a failing save propagates before any keyring
-            // deletion or tombstone occurs.
+            // Relay-canonical cascade agents are kept in Deleting state; only
+            // legacy agents are removed from the list. commit_cascade_agents is
+            // an injectable seam so unit tests can verify retry-safety: a failing
+            // save propagates before any keyring deletion.
             //
             // Failure semantics:
-            //   agent save fails   → nothing destroyed; full cascade retries cleanly
-            //   persona save fails → cascade agents gone, persona survives; a retry
-            //                        finds an empty cascade and proceeds cleanly
-            // Keys and tombstones are enqueued only after their records leave disk.
+            //   agent save fails   → nothing erased; full cascade retries cleanly
+            //   persona save fails → cascade agents already erased/flipped, persona
+            //                        survives; a retry finds an empty cascade and
+            //                        proceeds cleanly
+            let erase_set: std::collections::HashSet<String> =
+                erase_pubkeys.iter().cloned().collect();
             if !cascade.is_empty() {
-                commit_cascade_agents(&mut agents, &cascade, |recs| {
+                for (pk, authority) in &deleting_updates {
+                    if let Some(agent) = agents.iter_mut().find(|a| &a.pubkey == pk) {
+                        agent.relay_authority = authority.clone();
+                    }
+                }
+                commit_cascade_agents(&mut agents, &erase_set, |recs| {
                     save_managed_agents(&app, recs)
                 })?;
             }
@@ -236,20 +277,21 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
             }
             save_personas(&app, &personas)?;
 
-            // Side effects — strictly after records leave disk.
-            for pk in &cascade {
+            // Side effects — strictly after records leave disk. Only the legacy
+            // agents that actually left disk are erased/archived here; the
+            // relay-canonical agents' keys/caches/archive are handled by the
+            // deletion flush after verified confirmation.
+            for pk in &erase_pubkeys {
                 state.clear_agent_session_caches(pk);
                 // Remove nsec from keyring after the record is gone.
                 delete_agent_key(pk);
-                super::agents::tombstone_managed_agent_pending(
-                    &app,
-                    &state,
-                    pk,
-                    cascade_authorities
-                        .get(pk)
-                        .ok_or_else(|| format!("agent {pk} authority missing"))?,
-                );
                 super::agents::archive_managed_agent_pending(&app, &state, pk);
+            }
+            // Relay-canonical cascade agents are stopped now (their process must
+            // not outlive the deletion); their session caches are cleared so a
+            // stale handle cannot resurrect work while the tombstone confirms.
+            for pk in deleting_updates.keys() {
+                state.clear_agent_session_caches(pk);
             }
             tombstone_persona_pending(&app, &state, &d_tag);
 

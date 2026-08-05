@@ -108,9 +108,9 @@ fn reconcile_agents_in_dir_at(
         // only a local compatibility cache. Re-publishing its legacy kind:30177
         // projection at boot would let stale disk state race the aggregate's
         // transactionally bound projection (and could resurrect a deleted
-        // generation). Relay-authoritative records are reconciled through the
-        // PMA read-back path instead.
-        if record.relay_authority.is_relay_authoritative() {
+        // generation). Relay-authoritative and mid-deletion records are
+        // reconciled through the PMA read-back / deletion-flush paths instead.
+        if record.relay_authority.is_relay_canonical() {
             continue;
         }
 

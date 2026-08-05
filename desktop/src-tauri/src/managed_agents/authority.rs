@@ -45,6 +45,15 @@ pub enum RelayAuthority {
     /// record is a derived compatibility cache and MUST NOT be republished by
     /// boot reconcile. Carries the verified head [`RelayAuthorityEvidence`].
     RelayAuthoritative { evidence: RelayAuthorityEvidence },
+    /// Deletion has been enqueued for this relay-canonical agent but the
+    /// authoritative tombstone has not yet been verified at the relay. The
+    /// record is kept on disk in this terminal-pending state so a crash between
+    /// enqueue and verified erase retries cleanly — and so the head
+    /// [`RelayAuthorityEvidence`] needed to (re)sign the tombstone survives.
+    /// Like [`RelayAuthoritative`](Self::RelayAuthoritative), this record MUST
+    /// NOT be republished by boot reconcile: doing so could resurrect an agent
+    /// that is mid-deletion.
+    Deleting { evidence: RelayAuthorityEvidence },
 }
 
 /// Verified evidence that an agent has become relay-authoritative.
@@ -81,6 +90,14 @@ impl RelayAuthority {
         Self::RelayAuthoritative { evidence }
     }
 
+    /// Construct the terminal pending-deletion authority from the verified head
+    /// evidence being tombstoned. Reached only from the delete path, which
+    /// captures the evidence from the record's prior relay-authoritative state.
+    #[allow(dead_code)]
+    pub fn deleting(evidence: RelayAuthorityEvidence) -> Self {
+        Self::Deleting { evidence }
+    }
+
     /// Whether the relay is canonical for this agent. When `true`, boot
     /// reconcile must NOT republish the record's public projection.
     ///
@@ -90,14 +107,36 @@ impl RelayAuthority {
         matches!(self, Self::RelayAuthoritative { .. })
     }
 
-    /// The verified head evidence, when relay-authoritative.
+    /// Whether the relay owns this agent's canonical state — either promoted
+    /// ([`RelayAuthoritative`](Self::RelayAuthoritative)) or mid-deletion
+    /// ([`Deleting`](Self::Deleting)). Boot reconcile must NOT republish the
+    /// public projection in either case; a `Deleting` record left to reconcile
+    /// would resurrect an agent whose tombstone is still confirming.
+    #[allow(dead_code)]
+    pub fn is_relay_canonical(&self) -> bool {
+        matches!(
+            self,
+            Self::RelayAuthoritative { .. } | Self::Deleting { .. }
+        )
+    }
+
+    /// Whether deletion has been enqueued and is awaiting verified relay
+    /// confirmation.
+    #[allow(dead_code)]
+    pub fn is_deleting(&self) -> bool {
+        matches!(self, Self::Deleting { .. })
+    }
+
+    /// The verified head evidence, present whenever the relay is canonical
+    /// ([`RelayAuthoritative`](Self::RelayAuthoritative) or
+    /// [`Deleting`](Self::Deleting)).
     ///
     /// Consumed by the compare-and-swap mutation path (sibling lane), not yet
     /// wired.
     #[allow(dead_code)]
     pub fn evidence(&self) -> Option<&RelayAuthorityEvidence> {
         match self {
-            Self::RelayAuthoritative { evidence } => Some(evidence),
+            Self::RelayAuthoritative { evidence } | Self::Deleting { evidence } => Some(evidence),
             Self::LegacyOnly => None,
         }
     }

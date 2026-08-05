@@ -28,11 +28,15 @@
 
 use std::path::Path;
 
+use buzz_core_pkg::private_managed_agent::Payload;
 use nostr::{Event, Keys};
 use reqwest::Method;
 use serde::Deserialize;
 
-use super::{verify_promotion, AggregateResponse, MigrationCandidate, PromotionEvidence};
+use super::{
+    verify_deletion, verify_promotion, AggregateResponse, DeletionEvidence, MigrationCandidate,
+    PromotionEvidence,
+};
 use crate::managed_agents::retention::{
     get_retained_managed_agent_aggregate, record_managed_agent_aggregate_error,
 };
@@ -82,6 +86,13 @@ pub(crate) enum SubmitOutcome {
     Verified {
         attempt: RetainedAttempt,
         evidence: PromotionEvidence,
+    },
+    /// The relay served back a faithful deleted aggregate (tombstone). The
+    /// caller erases local record/key, durably marks local authority applied,
+    /// then compare-and-clears the retry.
+    VerifiedDeletion {
+        attempt: RetainedAttempt,
+        evidence: DeletionEvidence,
     },
     /// The attempt failed; a diagnostic was persisted and retry is preserved.
     Retained { error: String },
@@ -134,63 +145,132 @@ pub(crate) async fn submit_retained_aggregate(
         Ok(SubmitOutcome::Retained { error })
     };
 
-    let candidate = match reconstruct_candidate(row.request_json.as_bytes(), owner_keys) {
-        Ok(candidate) => candidate,
-        Err(error) => return record_failure(error),
-    };
-    if row.state != "active"
-        || candidate.payload.state != buzz_core_pkg::private_managed_agent::State::Active
-        || candidate.payload.generation != generation
-        || candidate.signed_event.id.to_hex() != private_event_id
-        || candidate.payload.owner_pubkey != owner_pubkey
-        || candidate.payload.agent_pubkey != agent_pubkey
-    {
-        return record_failure(
-            "retained active request does not match its owner/agent/generation/event/state coordinate"
-                .to_string(),
-        );
+    // Branch on the retained state. Both paths validate the reconstructed head
+    // against its coordinate BEFORE egress, so malformed or coordinate-drifted
+    // disk bytes never leave the device.
+    match row.state.as_str() {
+        "active" => {
+            let candidate = match reconstruct_candidate(row.request_json.as_bytes(), owner_keys) {
+                Ok(candidate) => candidate,
+                Err(error) => return record_failure(error),
+            };
+            if candidate.payload.state != buzz_core_pkg::private_managed_agent::State::Active
+                || candidate.payload.generation != generation
+                || candidate.signed_event.id.to_hex() != private_event_id
+                || candidate.payload.owner_pubkey != owner_pubkey
+                || candidate.payload.agent_pubkey != agent_pubkey
+            {
+                return record_failure(
+                    "retained active request does not match its owner/agent/generation/event/state coordinate"
+                        .to_string(),
+                );
+            }
+
+            let response = match submit_to_relay(
+                http_client,
+                relay_api_base_url,
+                owner_keys,
+                row.request_json.as_bytes(),
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(error) => return record_failure(error),
+            };
+
+            let evidence = match verify_promotion(&candidate, &response, owner_keys) {
+                Ok(evidence) => evidence,
+                Err(error) => return record_failure(format!("verification failed: {error:?}")),
+            };
+
+            // The relay's committed head must be the exact generation/event we
+            // retained; confirming a different coordinate would desync durable
+            // state from the relay. verify_promotion already proved the head is
+            // a faithful copy, so a mismatch here is a protocol violation.
+            if evidence.generation != generation || evidence.head_event_id != private_event_id {
+                return record_failure(format!(
+                    "read-back coordinate {}:{} does not match retained {generation}:{private_event_id}",
+                    evidence.generation, evidence.head_event_id
+                ));
+            }
+
+            let source_updated_at = candidate.payload.updated_at.clone();
+            Ok(SubmitOutcome::Verified {
+                attempt: RetainedAttempt {
+                    owner_pubkey: row.owner_pubkey,
+                    agent_pubkey: row.agent_pubkey,
+                    generation,
+                    private_event_id,
+                    state: row.state,
+                    source_updated_at,
+                },
+                evidence,
+            })
+        }
+        "deleted" => {
+            let (event, payload) =
+                match reconstruct_deletion(row.request_json.as_bytes(), owner_keys) {
+                    Ok(parsed) => parsed,
+                    Err(error) => return record_failure(error),
+                };
+            // Mirror the active branch: validate the FULL decrypted coordinate
+            // against the retained row before egress, not just the event id. A
+            // drifted owner/agent/generation (or a tombstone missing its chain
+            // predecessor) must never leave the device. `reconstruct_deletion`
+            // already proved state=Deleted / no active body / deleted_at present
+            // / null expected-definition-revision.
+            if event.id.to_hex() != private_event_id
+                || payload.generation != generation
+                || payload.owner_pubkey != owner_pubkey
+                || payload.agent_pubkey != agent_pubkey
+                || payload.previous_event_id.is_none()
+            {
+                return record_failure(
+                    "retained deleted request does not match its owner/agent/generation/event/predecessor coordinate"
+                        .to_string(),
+                );
+            }
+            let source_updated_at = payload.updated_at.clone();
+
+            let response = match submit_to_relay(
+                http_client,
+                relay_api_base_url,
+                owner_keys,
+                row.request_json.as_bytes(),
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(error) => return record_failure(error),
+            };
+
+            let evidence = match verify_deletion(&event, &response, owner_keys) {
+                Ok(evidence) => evidence,
+                Err(error) => {
+                    return record_failure(format!("deletion verification failed: {error:?}"))
+                }
+            };
+            if evidence.generation != generation || evidence.head_event_id != private_event_id {
+                return record_failure(format!(
+                    "deleted read-back coordinate {}:{} does not match retained {generation}:{private_event_id}",
+                    evidence.generation, evidence.head_event_id
+                ));
+            }
+
+            Ok(SubmitOutcome::VerifiedDeletion {
+                attempt: RetainedAttempt {
+                    owner_pubkey: row.owner_pubkey,
+                    agent_pubkey: row.agent_pubkey,
+                    generation,
+                    private_event_id,
+                    state: row.state,
+                    source_updated_at,
+                },
+                evidence,
+            })
+        }
+        other => record_failure(format!("retained aggregate has unknown state {other:?}")),
     }
-
-    let response = match submit_to_relay(
-        http_client,
-        relay_api_base_url,
-        owner_keys,
-        row.request_json.as_bytes(),
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(error) => return record_failure(error),
-    };
-
-    let evidence = match verify_promotion(&candidate, &response, owner_keys) {
-        Ok(evidence) => evidence,
-        Err(error) => return record_failure(format!("verification failed: {error:?}")),
-    };
-
-    // The relay's committed head must be the exact generation/event we retained;
-    // confirming a different coordinate would desync durable state from the
-    // relay. verify_promotion already proved the head is a faithful copy, so a
-    // mismatch here is a protocol violation, not a sync.
-    if evidence.generation != generation || evidence.head_event_id != private_event_id {
-        return record_failure(format!(
-            "read-back coordinate {}:{} does not match retained {generation}:{private_event_id}",
-            evidence.generation, evidence.head_event_id
-        ));
-    }
-
-    let source_updated_at = candidate.payload.updated_at.clone();
-    Ok(SubmitOutcome::Verified {
-        attempt: RetainedAttempt {
-            owner_pubkey: row.owner_pubkey,
-            agent_pubkey: row.agent_pubkey,
-            generation,
-            private_event_id,
-            state: row.state,
-            source_updated_at,
-        },
-        evidence,
-    })
 }
 
 /// POST the exact request bytes with fresh owner-signed NIP-98 auth and
@@ -267,6 +347,44 @@ fn reconstruct_candidate(body: &[u8], owner_keys: &Keys) -> Result<MigrationCand
         definition_event,
         instance_event,
     })
+}
+
+/// Rebuild the verification tombstone from the retained deleted request bytes:
+/// parse the single signed private event and decrypt it under the owner key.
+///
+/// A deletion carries no public projections or active body, so — unlike
+/// [`reconstruct_candidate`] — the definition/instance projections are absent by
+/// contract; their presence would mean the retained bytes are not a valid
+/// tombstone. A tombstone is also minted with a null `expected_definition_revision`
+/// (there is no active head to gate against), so a present revision means the
+/// bytes are not a valid deletion. Returns the signed head plus its decrypted
+/// payload; the caller mirrors the active branch and validates the full
+/// owner/agent/generation/predecessor coordinate before egress. `verify_deletion`
+/// (called by the "deleted" branch) additionally re-checks state/`active`/`deleted_at`.
+fn reconstruct_deletion(body: &[u8], owner_keys: &Keys) -> Result<(Event, Payload), String> {
+    let parsed: RetainedAggregateBody = serde_json::from_slice(body)
+        .map_err(|e| format!("retained request json is not a valid aggregate body: {e}"))?;
+    if parsed.definition_event.is_some() || parsed.instance_event.is_some() {
+        return Err("retained deleted request unexpectedly carries active projections".to_string());
+    }
+    if parsed.expected_definition_revision.is_some() {
+        return Err(
+            "retained deleted request unexpectedly carries an expected definition revision"
+                .to_string(),
+        );
+    }
+    let (_, payload) = buzz_core_pkg::private_managed_agent::validate_and_decrypt(
+        &parsed.private_event,
+        owner_keys,
+    )
+    .map_err(|e| format!("retained deletion head does not decrypt under the owner key: {e}"))?;
+    if payload.state != buzz_core_pkg::private_managed_agent::State::Deleted
+        || payload.active.is_some()
+        || payload.deleted_at.is_none()
+    {
+        return Err("retained deleted request head is not a valid deletion".to_string());
+    }
+    Ok((parsed.private_event, payload))
 }
 
 #[cfg(test)]

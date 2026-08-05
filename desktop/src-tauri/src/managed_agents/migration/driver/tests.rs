@@ -189,7 +189,61 @@ impl Fixture {
             request_json: self.request_json(),
             pending_sync: true,
             last_error: None,
+            local_authority_applied: false,
         }
+    }
+
+    /// Build the next-generation deleted tombstone for this agent, its verbatim
+    /// `request_json` (no active projections), and a faithful relay read-back —
+    /// the exact trio a `state:"deleted"` retained row drives.
+    fn tombstone(&self) -> nostr::Event {
+        super::super::build_tombstone_event(
+            &self.owner_keys,
+            &self.agent_hex(),
+            self.cas.generation,
+            &self.candidate.signed_event.id.to_hex(),
+            "2025-02-02T00:00:00Z",
+            CREATED_AT,
+        )
+        .expect("tombstone builds")
+    }
+
+    fn deleted_request_json(&self, tombstone: &nostr::Event) -> String {
+        json!({
+            "private_event": tombstone,
+            "definition_event": null,
+            "instance_event": null,
+            "expected_definition_revision": null,
+        })
+        .to_string()
+    }
+
+    fn deleted_retained_row(&self, tombstone: &nostr::Event) -> RetainedManagedAgentAggregate {
+        RetainedManagedAgentAggregate {
+            owner_pubkey: self.owner_hex(),
+            agent_pubkey: self.agent_hex(),
+            generation: self.cas.generation + 1,
+            private_event_id: tombstone.id.to_hex(),
+            state: "deleted".to_string(),
+            request_json: self.deleted_request_json(tombstone),
+            pending_sync: true,
+            last_error: None,
+            local_authority_applied: false,
+        }
+    }
+
+    fn faithful_deletion_response_json(&self, tombstone: &nostr::Event) -> serde_json::Value {
+        json!({
+            "event_id": tombstone.id.to_hex(),
+            "generation": self.cas.generation + 1,
+            "state": "deleted",
+            "accepted": true,
+            "inserted": true,
+            "private_event": tombstone,
+            "definition_event": null,
+            "instance_event": null,
+            "definition_revision": null,
+        })
     }
 }
 
@@ -242,6 +296,21 @@ fn seeded_conn(
     let path = dir.path().join("retention.db");
     let mut writer = open_retention_db(&path).expect("open db");
     retain_managed_agent_aggregate(&mut writer, row).expect("retain aggregate row");
+    open_retention_db(&path).expect("reopen db")
+}
+
+/// Seed the generation-1 active row (retention requires a contiguous chain
+/// starting at 1) followed by the generation-2 deleted tombstone row, so a
+/// deletion attempt has a valid predecessor to advance from.
+fn seeded_deletion_conn(
+    dir: &tempfile::TempDir,
+    fx: &Fixture,
+    deleted_row: &RetainedManagedAgentAggregate,
+) -> rusqlite::Connection {
+    let path = dir.path().join("retention.db");
+    let mut writer = open_retention_db(&path).expect("open db");
+    retain_managed_agent_aggregate(&mut writer, &fx.retained_row()).expect("retain active row");
+    retain_managed_agent_aggregate(&mut writer, deleted_row).expect("retain deleted row");
     open_retention_db(&path).expect("reopen db")
 }
 
@@ -484,4 +553,169 @@ async fn no_pending_row_is_a_noop() {
         captured.lock().unwrap().is_none(),
         "no row means no network submission"
     );
+}
+
+// ── Deletion transport ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn faithful_deletion_read_back_returns_evidence_and_posts_verbatim() {
+    let fx = Fixture::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tombstone = fx.tombstone();
+    let conn = seeded_deletion_conn(&dir, &fx, &fx.deleted_retained_row(&tombstone));
+
+    let (url, captured) = spawn_stub(StubReply {
+        status: StatusCode::OK,
+        body: fx.faithful_deletion_response_json(&tombstone).to_string(),
+    })
+    .await;
+    let state = app_state_at(url);
+
+    let outcome = submit_retained_aggregate(
+        &state.http_client,
+        &crate::relay::relay_api_base_url_with_override(&state),
+        &dir.path().join("retention.db"),
+        &fx.owner_keys,
+        &fx.owner_hex(),
+        &fx.agent_hex(),
+    )
+    .await
+    .expect("drive succeeds");
+
+    match outcome {
+        SubmitOutcome::VerifiedDeletion { attempt, evidence } => {
+            assert_eq!(attempt.state, "deleted");
+            assert_eq!(attempt.generation, fx.cas.generation + 1);
+            assert_eq!(attempt.private_event_id, tombstone.id.to_hex());
+            assert_eq!(evidence.head_event_id, tombstone.id.to_hex());
+            assert_eq!(evidence.generation, fx.cas.generation + 1);
+            // The tombstone's predecessor is the prior head we tombstoned.
+            assert_eq!(
+                evidence.previous_event_id,
+                fx.candidate.signed_event.id.to_hex()
+            );
+        }
+        other => panic!("expected verified deletion, got {other:?}"),
+    }
+
+    // Posted bytes are the retained deleted request verbatim.
+    let posted = captured.lock().unwrap().clone().expect("body captured");
+    assert_eq!(
+        posted,
+        fx.deleted_request_json(&tombstone).into_bytes(),
+        "deletion posts the retained tombstone verbatim"
+    );
+
+    // Transport success is not permission to clear retry — the flush erases
+    // + marks applied first, then compare-and-clears.
+    let retained = get_retained_managed_agent_aggregate(&conn, &fx.owner_hex(), &fx.agent_hex())
+        .unwrap()
+        .unwrap();
+    assert!(
+        retained.pending_sync,
+        "verified deletion leaves retry pending"
+    );
+}
+
+#[tokio::test]
+async fn deleted_row_with_active_payload_is_rejected_before_egress() {
+    // A `state:"deleted"` row whose request bytes are actually an ACTIVE
+    // aggregate (definition/instance projections + active head) must never
+    // leave the device: `reconstruct_deletion` rejects the shape pre-POST.
+    let fx = Fixture::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut row = fx.retained_row(); // active request_json…
+    row.state = "deleted".to_string(); // …mislabeled deleted.
+    let conn = seeded_conn(&dir, &row);
+
+    let (url, captured) = spawn_stub(StubReply {
+        status: StatusCode::OK,
+        body: fx.faithful_response_json().to_string(),
+    })
+    .await;
+    let state = app_state_at(url);
+
+    let outcome = submit_retained_aggregate(
+        &state.http_client,
+        &crate::relay::relay_api_base_url_with_override(&state),
+        &dir.path().join("retention.db"),
+        &fx.owner_keys,
+        &fx.owner_hex(),
+        &fx.agent_hex(),
+    )
+    .await
+    .expect("drive resolves");
+
+    assert!(matches!(outcome, SubmitOutcome::Retained { .. }));
+    assert!(
+        captured.lock().unwrap().is_none(),
+        "an invalid deletion must be rejected before network submission"
+    );
+    let stored = get_retained_managed_agent_aggregate(&conn, &fx.owner_hex(), &fx.agent_hex())
+        .unwrap()
+        .unwrap();
+    assert!(stored.pending_sync, "rejected deletion stays pending");
+    assert!(stored.last_error.is_some(), "diagnostic persisted");
+}
+
+#[tokio::test]
+async fn deleted_read_back_coordinate_mismatch_preserves_retry() {
+    // The relay accepts and serves a well-formed but DIFFERENT deleted head
+    // (swapped event id). verify_deletion fails and the retry is preserved —
+    // never confirming a head the row did not commit.
+    let fx = Fixture::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tombstone = fx.tombstone();
+    let conn = seeded_deletion_conn(&dir, &fx, &fx.deleted_retained_row(&tombstone));
+
+    let mut tampered = fx.faithful_deletion_response_json(&tombstone);
+    tampered["event_id"] = json!("0".repeat(64));
+    let (url, _captured) = spawn_stub(StubReply {
+        status: StatusCode::OK,
+        body: tampered.to_string(),
+    })
+    .await;
+    let state = app_state_at(url);
+
+    let outcome = submit_retained_aggregate(
+        &state.http_client,
+        &crate::relay::relay_api_base_url_with_override(&state),
+        &dir.path().join("retention.db"),
+        &fx.owner_keys,
+        &fx.owner_hex(),
+        &fx.agent_hex(),
+    )
+    .await
+    .expect("drive resolves");
+
+    assert!(matches!(outcome, SubmitOutcome::Retained { .. }));
+    let row = get_retained_managed_agent_aggregate(&conn, &fx.owner_hex(), &fx.agent_hex())
+        .unwrap()
+        .unwrap();
+    assert!(
+        row.pending_sync,
+        "unverified deletion read-back never clears retry"
+    );
+    assert!(row.last_error.is_some(), "diagnostic persisted");
+}
+
+// ── NIP-49 egress guard: boundary 9 (PMA aggregate submit) ──────────────────
+
+/// A valid NIP-49 key backup. If this string ever reaches the wire the guard
+/// has failed; the test proves it is refused before any network I/O.
+const NCRYPTSEC: &str = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+
+/// An aggregate body carrying an ncryptsec must be rejected by
+/// [`submit_to_relay`]'s egress guard BEFORE any network I/O. The target is a
+/// discard address, so a *guard* error — not a connection error — proves the
+/// abort ordering (the guard runs before `wait_for_rate_limit` and the POST).
+#[tokio::test]
+async fn aggregate_submit_blocks_ncryptsec_before_network() {
+    let client = reqwest::Client::new();
+    let owner_keys = Keys::generate();
+    let body = format!("{{\"private_event\":\"{NCRYPTSEC}\"}}");
+    let err = submit_to_relay(&client, "http://127.0.0.1:9", &owner_keys, body.as_bytes())
+        .await
+        .unwrap_err();
+    assert!(err.contains("key-backup material"), "{err}");
 }

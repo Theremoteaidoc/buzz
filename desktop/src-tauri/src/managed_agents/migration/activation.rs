@@ -162,6 +162,7 @@ pub(crate) fn enqueue_initial_migrations(
                 request_json,
                 pending_sync: true,
                 last_error: None,
+                local_authority_applied: false,
             },
         )?;
         enqueued += 1;
@@ -259,4 +260,310 @@ pub(crate) async fn flush_pending_migrations(
         }
     }
     Ok(promoted)
+}
+
+/// Submit all pending deleted attempts (tombstones) for the captured workspace
+/// scope, erasing local record/key only after verified relay confirmation.
+///
+/// This is the async confirming half of the crash-safe deletion seam. The
+/// delete command durably enqueues the deleted aggregate and flips the record to
+/// [`RelayAuthority::Deleting`] BEFORE any erase; this flush verifies the
+/// tombstone at the relay, then applies the erase in a strict crash-safe order:
+///
+///   1. verified read-back (`SubmitOutcome::VerifiedDeletion`),
+///   2. erase record + key + session caches + archive request, and save,
+///   3. durably set `local_authority_applied` (the terminal proof), then
+///   4. compare-and-clear the retained row.
+///
+/// **Crash replay honors the durable marker, never mere record absence.** On
+/// replay the `Deleting` record may already be gone. Only a set marker proves
+/// the exact deletion reached local authority; absence alone could equally be an
+/// unrelated/manual deletion, which must NOT license clearing the retry. So a
+/// missing record with an unset marker leaves the row pending + records a
+/// diagnostic, while a missing record with the marker already set is cleared
+/// idempotently.
+pub(crate) async fn flush_pending_deletions(
+    app: &tauri::AppHandle,
+    client: &reqwest::Client,
+    relay_api_base_url: &str,
+    owner_keys: &Keys,
+    db_path: &Path,
+) -> Result<usize, String> {
+    use crate::managed_agents::retention::mark_managed_agent_deletion_local_authority_applied;
+
+    let owner_pubkey = owner_keys.public_key().to_hex();
+    let pending =
+        get_pending_managed_agent_aggregates(&open_retention_db(db_path)?, &owner_pubkey)?;
+    let mut deleted = 0;
+    for row in pending.into_iter().filter(|row| row.state == "deleted") {
+        let state = app.state::<AppState>();
+        let current_owner = state.signing_keys()?.public_key().to_hex();
+        let current_relay_api = crate::relay::relay_api_base_url_with_override(&state);
+        if current_owner != owner_pubkey
+            || current_relay_api.trim_end_matches('/') != relay_api_base_url.trim_end_matches('/')
+        {
+            return Ok(deleted);
+        }
+        let outcome = super::driver::submit_retained_aggregate(
+            client,
+            relay_api_base_url,
+            db_path,
+            owner_keys,
+            &owner_pubkey,
+            &row.agent_pubkey,
+        )
+        .await?;
+        let super::driver::SubmitOutcome::VerifiedDeletion { attempt, evidence } = outcome else {
+            continue;
+        };
+
+        let state = app.state::<AppState>();
+        // Applied means the exact verified deletion reached local authority. The
+        // crash-safe order is: (1) set the durable marker FIRST — it means
+        // "verified deletion pending local application" and is the terminal proof
+        // replay trusts — then (2) erase the record/key/caches/archive
+        // idempotently. A crash BEFORE the marker replays verification and
+        // re-attempts; a crash AFTER the marker but before the erase re-runs the
+        // erase; a crash AFTER the erase clears on record absence + marker.
+        // Record absence ALONE never licenses clearing — it could be an unrelated
+        // or manual deletion; only the marker proves THIS deletion applied.
+        let applied = {
+            let _guard = state
+                .managed_agents_store_lock
+                .lock()
+                .map_err(|error| error.to_string())?;
+
+            // Step 1: durably set the marker (idempotent CAS on the exact
+            // tombstone coordinate). Nothing is destroyed until this lands.
+            let conn = open_retention_db(db_path)?;
+            let marker_set = mark_managed_agent_deletion_local_authority_applied(
+                &conn,
+                &attempt.owner_pubkey,
+                &attempt.agent_pubkey,
+                attempt.generation,
+                &attempt.private_event_id,
+            )?;
+            drop(conn);
+
+            // Step 2: erase idempotently. Accept the record still authoritative
+            // (RelayAuthoritative — enqueue landed but the authority flip/save
+            // crashed, per the cascade self-heal contract) OR mid-deletion
+            // (Deleting), but ONLY when its evidence is the tombstone's exact
+            // predecessor: generation `attempt.generation - 1` at
+            // `evidence.previous_event_id`. Binding to it prevents erasing a
+            // record a racing workspace switch/edit re-created or advanced, and
+            // leaves any nonmatching record in place so the retry stays blocked.
+            let mut records = load_managed_agents(app)?;
+            let prior_generation = attempt.generation.saturating_sub(1);
+            let had_match = records.iter().any(|record| {
+                is_exact_deletion_predecessor(
+                    &record.pubkey,
+                    record.relay_authority.evidence(),
+                    &attempt.agent_pubkey,
+                    prior_generation,
+                    &evidence.previous_event_id,
+                )
+            });
+            // A record at this pubkey that is NOT the exact predecessor blocks:
+            // clearing would abandon a live/advanced identity.
+            let has_blocking_record = records.iter().any(|record| {
+                record.pubkey == attempt.agent_pubkey
+                    && !is_exact_deletion_predecessor(
+                        &record.pubkey,
+                        record.relay_authority.evidence(),
+                        &attempt.agent_pubkey,
+                        prior_generation,
+                        &evidence.previous_event_id,
+                    )
+            });
+            if had_match {
+                records.retain(|record| {
+                    !is_exact_deletion_predecessor(
+                        &record.pubkey,
+                        record.relay_authority.evidence(),
+                        &attempt.agent_pubkey,
+                        prior_generation,
+                        &evidence.previous_event_id,
+                    )
+                });
+                save_managed_agents(app, &records)?;
+                managed_agents::delete_agent_key(&attempt.agent_pubkey);
+                state.clear_agent_session_caches(&attempt.agent_pubkey);
+                crate::commands::agents::archive_managed_agent_pending(
+                    app,
+                    &state,
+                    &attempt.agent_pubkey,
+                );
+            }
+
+            // Cleared only when the marker is durable AND no foreign/advanced
+            // record remains at this pubkey. On replay the record may already be
+            // absent (erased in a prior run) — that plus the set marker clears
+            // idempotently.
+            deletion_apply_clears(marker_set, has_blocking_record)
+        };
+
+        let conn = open_retention_db(db_path)?;
+        if applied {
+            if mark_managed_agent_aggregate_synced(
+                &conn,
+                &attempt.owner_pubkey,
+                &attempt.agent_pubkey,
+                attempt.generation,
+                &attempt.private_event_id,
+            )? {
+                deleted += 1;
+            }
+        } else {
+            let _ = record_managed_agent_aggregate_error(
+                &conn,
+                &attempt.owner_pubkey,
+                &attempt.agent_pubkey,
+                attempt.generation,
+                &attempt.private_event_id,
+                "local deletion authority not applied; retry preserved",
+            );
+        }
+    }
+    Ok(deleted)
+}
+
+/// Pure erase-match predicate for the deletion flush: does a record with this
+/// `pubkey` / relay-authority `evidence` name the exact record this verified
+/// tombstone supersedes?
+///
+/// A tombstone advances the CAS chain by one, so the record it deletes carries
+/// the tombstone's PREDECESSOR evidence: generation = `prior_generation`
+/// (the tombstone generation minus one) at `previous_event_id`. This matches
+/// EITHER authority state that keeps relay evidence — `RelayAuthoritative`
+/// (enqueue landed but the authority flip/save crashed; the flush self-heals it)
+/// or `Deleting` (the flip landed). A record without evidence (`LegacyOnly`)
+/// never matches. Binding to the exact predecessor prevents erasing a record a
+/// racing workspace switch/edit re-created or advanced.
+fn is_exact_deletion_predecessor(
+    record_pubkey: &str,
+    record_evidence: Option<&RelayAuthorityEvidence>,
+    agent_pubkey: &str,
+    prior_generation: u64,
+    previous_event_id: &str,
+) -> bool {
+    record_pubkey == agent_pubkey
+        && record_evidence.is_some_and(|authority| {
+            authority.generation == prior_generation
+                && authority.private_event_id == previous_event_id
+        })
+}
+
+/// Pure clear decision for the deletion flush, encoding the marker-before-erase
+/// crash-replay contract. The retry's row is compare-cleared ONLY when:
+///   * `marker_set` — the durable "verified deletion pending local application"
+///     marker is set. It is set BEFORE any erase, so a crash before it replays
+///     verification; a crash after it (before or during erase) replays the
+///     idempotent erase. Record absence alone NEVER clears — it could be an
+///     unrelated/manual deletion.
+///   * `!has_blocking_record` — no foreign/advanced record remains at the
+///     coordinate. A record that is not the exact predecessor means a racing
+///     re-create/advance; clearing would abandon a live identity, so stay
+///     blocked until it resolves.
+fn deletion_apply_clears(marker_set: bool, has_blocking_record: bool) -> bool {
+    marker_set && !has_blocking_record
+}
+
+#[cfg(test)]
+mod deletion_apply_tests {
+    use super::*;
+    use crate::managed_agents::authority::{RelayAuthority, RelayAuthorityEvidence};
+
+    const AGENT: &str = "agent-pubkey-hex";
+    const PRED_ID: &str = "predecessor-event-id";
+    const PRIOR_GEN: u64 = 4;
+
+    fn evidence(gen: u64, id: &str) -> RelayAuthorityEvidence {
+        RelayAuthorityEvidence {
+            generation: gen,
+            private_event_id: id.to_string(),
+        }
+    }
+
+    /// Helper: run the predicate as the flush does, deriving the evidence from a
+    /// concrete [`RelayAuthority`] so tests exercise the real accessor.
+    fn matches(pubkey: &str, authority: &RelayAuthority) -> bool {
+        is_exact_deletion_predecessor(pubkey, authority.evidence(), AGENT, PRIOR_GEN, PRED_ID)
+    }
+
+    #[test]
+    fn deleting_record_at_exact_predecessor_matches() {
+        assert!(matches(
+            AGENT,
+            &RelayAuthority::deleting(evidence(PRIOR_GEN, PRED_ID))
+        ));
+    }
+
+    #[test]
+    fn authoritative_record_at_exact_predecessor_matches_for_self_heal() {
+        // Cascade enqueue-N/save-fail leaves the record RelayAuthoritative with a
+        // pending tombstone. The flush must still recognize and erase it.
+        assert!(matches(
+            AGENT,
+            &RelayAuthority::relay_authoritative(evidence(PRIOR_GEN, PRED_ID))
+        ));
+    }
+
+    #[test]
+    fn advanced_generation_record_does_not_match() {
+        // A racing edit advanced the head past the tombstone's predecessor.
+        assert!(!matches(
+            AGENT,
+            &RelayAuthority::relay_authoritative(evidence(PRIOR_GEN + 1, "newer-head"))
+        ));
+    }
+
+    #[test]
+    fn different_predecessor_id_does_not_match() {
+        assert!(!matches(
+            AGENT,
+            &RelayAuthority::deleting(evidence(PRIOR_GEN, "other-event-id"))
+        ));
+    }
+
+    #[test]
+    fn legacy_record_never_matches() {
+        assert!(!matches(AGENT, &RelayAuthority::legacy()));
+    }
+
+    #[test]
+    fn different_agent_never_matches() {
+        assert!(!matches(
+            "someone-else",
+            &RelayAuthority::deleting(evidence(PRIOR_GEN, PRED_ID))
+        ));
+    }
+
+    #[test]
+    fn crash_after_marker_before_erase_reclears_on_next_pass() {
+        // Marker set, matching record still present (erase never ran): the flush
+        // re-erases (had_match) and clears. No blocking record remains after the
+        // in-run erase, so the decision clears.
+        assert!(deletion_apply_clears(true, /*has_blocking=*/ false));
+    }
+
+    #[test]
+    fn crash_after_erase_clears_on_absence_plus_marker() {
+        // Record already gone from a prior run, marker set, nothing blocking:
+        // absence + marker clears idempotently.
+        assert!(deletion_apply_clears(true, false));
+    }
+
+    #[test]
+    fn crash_before_marker_does_not_clear() {
+        // Marker never landed (crash before step 1). The row must stay pending so
+        // the next boot replays verification — record absence alone never clears.
+        assert!(!deletion_apply_clears(/*marker_set=*/ false, false));
+    }
+
+    #[test]
+    fn blocking_advanced_record_does_not_clear_even_with_marker() {
+        // A foreign/advanced record at the coordinate blocks the clear.
+        assert!(!deletion_apply_clears(true, /*has_blocking=*/ true));
+    }
 }
