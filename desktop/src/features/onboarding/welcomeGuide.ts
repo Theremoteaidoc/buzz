@@ -18,6 +18,7 @@ import type {
   AgentPersona,
   CreateManagedAgentInput,
   ManagedAgent,
+  UpdateManagedAgentInput,
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -283,6 +284,37 @@ export function welcomeTeammateHasExpectedAccess(
 }
 
 /**
+ * The access write that moves a Welcome teammate to the state this build
+ * expects, or null when it is already there. The remediation target must track
+ * {@link welcomeTeammateHasExpectedAccess}: writing `allowlist:[lead]` in an
+ * owner-only build would fail the predicate again on the next provisioning
+ * pass, so an upgraded install with pre-existing allowlisted teammates would
+ * rewrite the same rejected state forever and keep restarting them.
+ */
+export function welcomeTeammateAccessUpdate(
+  teammate: ManagedAgent,
+  leadPubkey: string,
+  agentAccessOwnerOnly: boolean,
+): UpdateManagedAgentInput | null {
+  if (
+    welcomeTeammateHasExpectedAccess(teammate, leadPubkey, agentAccessOwnerOnly)
+  ) {
+    return null;
+  }
+  return agentAccessOwnerOnly
+    ? {
+        pubkey: teammate.pubkey,
+        respondTo: "owner-only",
+        respondToAllowlist: [],
+      }
+    : {
+        pubkey: teammate.pubkey,
+        respondTo: "allowlist",
+        respondToAllowlist: [leadPubkey],
+      };
+}
+
+/**
  * Ensure the complete built-in Welcome Team is ready for kickoff.
  * The team itself is Rust-seeded; this only activates personas, creates any
  * missing relay-scoped instances, and adds all three to Welcome as bots.
@@ -346,17 +378,13 @@ async function provisionWelcomeTeam(
   const leadPubkey = lead.pubkey;
   for (const index of [1, 2] as const) {
     const teammate = welcomeAgents[index];
-    const alreadyAllowsLead = welcomeTeammateHasExpectedAccess(
+    const accessUpdate = welcomeTeammateAccessUpdate(
       teammate,
       leadPubkey,
       agentAccessOwnerOnly,
     );
-    if (!alreadyAllowsLead) {
-      const updated = await updateManagedAgent({
-        pubkey: teammate.pubkey,
-        respondTo: "allowlist",
-        respondToAllowlist: [leadPubkey],
-      });
+    if (accessUpdate) {
+      const updated = await updateManagedAgent(accessUpdate);
       welcomeAgents[index] = updated.agent;
     }
   }
