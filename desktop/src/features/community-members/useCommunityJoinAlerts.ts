@@ -91,8 +91,17 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
 
     // Persisted before notifying, never after: a crash between the two must
     // lose the notification rather than repeat it on every later snapshot.
+    //
+    // A write that cannot land (quota still exceeded after cache eviction)
+    // leaves the ledger ref alone deliberately. Advancing it would mark these
+    // keys seen in memory while nothing reached storage, so the alert would be
+    // lost until a reload; leaving it means the next snapshot retries the
+    // write and the alert survives to whichever attempt lands. The notify is
+    // skipped either way — a false return means nothing was persisted, so
+    // notifying here is exactly the "repeat on every later snapshot" this
+    // ordering exists to prevent.
+    if (!writeJoinAlertLedger(communityId, normalizedViewer, ledger)) return;
     ledgerRef.current = ledger;
-    writeJoinAlertLedger(communityId, normalizedViewer, ledger);
     if (alerts.length === 0) return;
 
     // Resolve display names so the alert reads "Alice joined" rather than a
