@@ -509,13 +509,9 @@ List<MainTimelineEntry> buildMainTimelineEntries(
   List<TimelineMessage> messages, {
   Map<String, ChannelWindowThreadSummary>? relaySummaries,
 }) {
-  // Index direct children by parentId.
-  final childrenByParent = <String, List<TimelineMessage>>{};
-  for (final msg in messages) {
-    final pid = msg.parentId;
-    if (pid == null) continue;
-    childrenByParent.putIfAbsent(pid, () => []).add(msg);
-  }
+  // Index descendant stats by ancestor, so a nested reply updates every summary
+  // above it and not only the summary of its direct parent.
+  final descendantStats = _buildDescendantStats(messages);
 
   return [
     for (final msg in messages)
@@ -524,7 +520,7 @@ List<MainTimelineEntry> buildMainTimelineEntries(
           message: msg,
           summary: _buildSummary(
             msg.id,
-            childrenByParent,
+            descendantStats,
             relaySummaries?[msg.id],
           ),
         ),
@@ -547,12 +543,17 @@ bool _isBroadcastReply(TimelineMessage message) {
 /// the later reply time rather than letting one shadow the other. The facepile
 /// order is mobile's own (see [_mergeParticipants]) because this file already
 /// renders relay participants in the order the relay sent them.
+///
+/// Both halves count descendants, not direct replies: the relay's
+/// `descendant_count` and the locally assembled [_buildDescendantStats]. A badge
+/// on the main timeline stands for the whole thread under that message, so a
+/// reply to a reply has to raise it.
 ThreadSummary? _buildSummary(
   String messageId,
-  Map<String, List<TimelineMessage>> childrenByParent,
+  Map<String, _DescendantStats> descendantStats,
   ChannelWindowThreadSummary? relaySummary,
 ) {
-  final local = _buildLocalSummary(messageId, childrenByParent);
+  final local = _buildLocalSummary(messageId, descendantStats);
   final relay = _buildRelaySummary(messageId, relaySummary);
   if (relay == null) return local;
   if (local == null) return relay;
@@ -575,27 +576,91 @@ ThreadSummary? _buildSummary(
 }
 
 /// Summary assembled from the replies present in the loaded timeline.
+///
+/// Counts every loaded descendant, not only direct children, because the root
+/// badge in the main timeline stands for the whole thread. This mirrors the
+/// desktop's `buildSummaryForDirectReplies`, which reads the same descendant
+/// stats and reverses the newest-first participants to oldest-first.
 ThreadSummary? _buildLocalSummary(
   String messageId,
-  Map<String, List<TimelineMessage>> childrenByParent,
+  Map<String, _DescendantStats> descendantStats,
 ) {
-  final replies = childrenByParent[messageId];
-  if (replies == null || replies.isEmpty) return null;
-
-  // Up to 3 most recent unique participants (walk backwards).
-  final seen = <String>{};
-  final participants = <String>[];
-  for (var i = replies.length - 1; i >= 0 && participants.length < 3; i--) {
-    final pk = replies[i].pubkey.toLowerCase();
-    if (seen.add(pk)) participants.add(pk);
-  }
+  final stats = descendantStats[messageId];
+  if (stats == null || stats.descendantCount == 0) return null;
 
   return ThreadSummary(
     threadHeadId: messageId,
-    replyCount: replies.length,
-    participantPubkeys: participants.reversed.toList(),
-    lastReplyAt: replies.last.createdAt,
+    replyCount: stats.descendantCount,
+    participantPubkeys: stats.recentParticipantsNewestFirst.reversed.toList(),
+    lastReplyAt: stats.lastReplyAt,
   );
+}
+
+/// Descendant count, last reply time, and recent participants for every message
+/// that has at least one loaded descendant.
+///
+/// Mirrors the desktop's `buildDescendantStatsByMessageId`
+/// (`desktop/src/features/messages/lib/threadPanel.ts`): each message is
+/// attributed to every ancestor on its parent chain, so a reply nested under a
+/// reply still counts towards the root it belongs to. Messages are visited
+/// newest first so the capped participant list keeps the most recent repliers.
+Map<String, _DescendantStats> _buildDescendantStats(
+  List<TimelineMessage> messages,
+) {
+  final messageById = <String, TimelineMessage>{
+    for (final msg in messages) msg.id: msg,
+  };
+  final statsByMessageId = <String, _DescendantStats>{
+    for (final msg in messages) msg.id: _DescendantStats(),
+  };
+
+  // Oldest first, keeping the original order for messages sharing a timestamp,
+  // then walked in reverse so participants are collected newest first.
+  final ordered = List<int>.generate(messages.length, (index) => index)
+    ..sort((left, right) {
+      final byCreatedAt = messages[left].createdAt.compareTo(
+        messages[right].createdAt,
+      );
+      return byCreatedAt != 0 ? byCreatedAt : left.compareTo(right);
+    });
+
+  for (var i = ordered.length - 1; i >= 0; i--) {
+    final message = messages[ordered[i]];
+    final participant = message.pubkey.toLowerCase();
+
+    // Cap the walk so a malformed parent chain (a cycle, for instance) cannot
+    // spin forever.
+    var ancestorId = message.parentId;
+    var hops = 0;
+    final maxHops = messages.length + 1;
+
+    while (ancestorId != null && hops < maxHops) {
+      final ancestorStats = statsByMessageId[ancestorId];
+      if (ancestorStats == null) break;
+
+      ancestorStats.descendantCount += 1;
+      ancestorStats.lastReplyAt = _laterOf(
+        ancestorStats.lastReplyAt,
+        message.createdAt,
+      );
+      if (ancestorStats.recentParticipantsNewestFirst.length < 3 &&
+          !ancestorStats.recentParticipantsNewestFirst.contains(participant)) {
+        ancestorStats.recentParticipantsNewestFirst.add(participant);
+      }
+
+      ancestorId = messageById[ancestorId]?.parentId;
+      hops += 1;
+    }
+  }
+
+  return statsByMessageId;
+}
+
+/// Mutable accumulator for [_buildDescendantStats].
+class _DescendantStats {
+  int descendantCount = 0;
+  int? lastReplyAt;
+  final List<String> recentParticipantsNewestFirst = [];
 }
 
 /// Summary from the relay's recount, or null when it reports no replies.
@@ -603,10 +668,10 @@ ThreadSummary? _buildRelaySummary(
   String messageId,
   ChannelWindowThreadSummary? relaySummary,
 ) {
-  if (relaySummary == null || relaySummary.replyCount <= 0) return null;
+  if (relaySummary == null || relaySummary.descendantCount <= 0) return null;
   return ThreadSummary(
     threadHeadId: messageId,
-    replyCount: relaySummary.replyCount,
+    replyCount: relaySummary.descendantCount,
     participantPubkeys: relaySummary.participantPubkeys.take(3).toList(),
     lastReplyAt: relaySummary.lastReplyAt,
   );

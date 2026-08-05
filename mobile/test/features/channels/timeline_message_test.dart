@@ -827,17 +827,23 @@ void main() {
       expect(entries[0].summary!.lastReplyAt, 3000);
     });
 
-    test('summary counts only direct children, not nested replies', () {
-      final messages = formatTimeline([
-        _textMsg(id: 'a', createdAt: 1000),
-        _replyMsg(id: 'r1', parentId: 'a', createdAt: 2000),
-        _replyMsg(id: 'r2', parentId: 'r1', rootId: 'a', createdAt: 3000),
-      ]);
+    test(
+      'summary counts every loaded descendant, not only direct children',
+      () {
+        final messages = formatTimeline([
+          _textMsg(id: 'a', createdAt: 1000),
+          _replyMsg(id: 'r1', parentId: 'a', createdAt: 2000),
+          _replyMsg(id: 'r2', parentId: 'r1', rootId: 'a', createdAt: 3000),
+        ]);
 
-      final entries = buildMainTimelineEntries(messages);
-      // Only r1 is a direct child of a; r2 is a child of r1.
-      expect(entries[0].summary!.replyCount, 1);
-    });
+        final entries = buildMainTimelineEntries(messages);
+        // The root badge stands for the whole thread, so the reply to r1 counts
+        // towards 'a' as well. This matches the relay's `descendant_count` and
+        // the desktop's `buildDescendantStatsByMessageId`.
+        expect(entries[0].summary!.replyCount, 2);
+        expect(entries[0].summary!.lastReplyAt, 3000);
+      },
+    );
 
     test('summary has up to 3 unique participant pubkeys', () {
       final messages = formatTimeline([
@@ -881,11 +887,12 @@ void main() {
   group('buildMainTimelineEntries relay summary merge', () {
     ChannelWindowThreadSummary relaySummary({
       required int replyCount,
+      int? descendantCount,
       int? lastReplyAt,
       List<String> participantPubkeys = const ['zoe'],
     }) => ChannelWindowThreadSummary(
       replyCount: replyCount,
-      descendantCount: replyCount,
+      descendantCount: descendantCount ?? replyCount,
       lastReplyAt: lastReplyAt,
       participantPubkeys: participantPubkeys,
     );
@@ -979,7 +986,7 @@ void main() {
       expect(entries.single.summary!.lastReplyAt, 2000);
     });
 
-    test('a nested reply does not inflate its root badge', () {
+    test('a locally seen nested reply raises its root badge', () {
       final messages = formatTimeline([
         _textMsg(id: 'a', createdAt: 1000),
         _replyMsg(id: 'r1', parentId: 'a', pubkey: 'bob', createdAt: 2000),
@@ -992,15 +999,43 @@ void main() {
         ),
       ]);
 
-      // The relay counts direct replies in `reply_count`, so 'a' is at 1 even
-      // though the thread has two events under it.
+      // The recount for 'a' predates r2, so only the locally seen nested reply
+      // can bring the root badge, time, and facepile up to date.
       final entries = buildMainTimelineEntries(
         messages,
-        relaySummaries: {'a': relaySummary(replyCount: 1, lastReplyAt: 2000)},
+        relaySummaries: {
+          'a': relaySummary(
+            replyCount: 1,
+            lastReplyAt: 2000,
+            participantPubkeys: const ['bob'],
+          ),
+        },
       );
 
-      expect(entries.single.message.id, 'a');
-      expect(entries.single.summary!.replyCount, 1);
+      final root = entries.firstWhere((entry) => entry.message.id == 'a');
+      expect(root.summary!.replyCount, 2);
+      expect(root.summary!.lastReplyAt, 3000);
+      expect(root.summary!.participantPubkeys, ['bob', 'carol']);
+    });
+
+    test('the relay half counts descendants, not direct replies', () {
+      final messages = formatTimeline([_textMsg(id: 'a', createdAt: 1000)]);
+
+      // The relay reports both numbers. A thread of nested replies has a
+      // `reply_count` far below its `descendant_count`, and the badge stands
+      // for the whole thread.
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          'a': relaySummary(
+            replyCount: 1,
+            descendantCount: 5,
+            lastReplyAt: 9000,
+          ),
+        },
+      );
+
+      expect(entries.single.summary!.replyCount, 5);
     });
 
     test('a nested reply badges the reply it answers', () {
@@ -1032,7 +1067,7 @@ void main() {
       );
 
       final byId = {for (final entry in entries) entry.message.id: entry};
-      expect(byId['a']!.summary!.replyCount, 1);
+      expect(byId['a']!.summary!.replyCount, 2);
       expect(byId['r1']!.summary!.replyCount, 1);
       expect(byId['r1']!.summary!.participantPubkeys, ['carol']);
       expect(byId['r1']!.summary!.lastReplyAt, 3000);
