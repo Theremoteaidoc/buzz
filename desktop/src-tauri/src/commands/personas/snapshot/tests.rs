@@ -73,6 +73,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
         relay_mesh: None,
+        relay_authority: crate::managed_agents::RelayAuthority::legacy(),
     }
 }
 

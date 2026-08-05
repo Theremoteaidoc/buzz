@@ -153,6 +153,7 @@ impl AgentDefinition {
             definition_respond_to_allowlist: self.respond_to_allowlist,
             definition_parallelism: self.parallelism,
             relay_mesh: None,
+            relay_authority: crate::managed_agents::RelayAuthority::legacy(),
         }
     }
 }
@@ -438,6 +439,16 @@ pub struct ManagedAgentRecord {
     /// deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<RelayMeshConfig>,
+    /// Per-agent relay-canonical authority state + verified head evidence.
+    ///
+    /// `#[serde(default)]` so a store written by a build that predates this
+    /// field deserializes as [`RelayAuthority::LegacyOnly`]: local JSON +
+    /// keyring stay canonical and boot reconcile keeps republishing the public
+    /// projection. No record is silently promoted; promotion happens only
+    /// through the verified (not-yet-enabled) migration path. See
+    /// [`super::authority`].
+    #[serde(default)]
+    pub relay_authority: super::authority::RelayAuthority,
 }
 
 /// Typed relay-mesh configuration carried on a [`ManagedAgentRecord`].

@@ -2,6 +2,7 @@ mod agent_env;
 pub(crate) mod agent_events;
 pub(crate) mod agent_snapshot;
 pub(crate) mod agent_snapshot_envelope;
+mod authority;
 pub(crate) mod team_snapshot;
 pub(crate) use agent_env::{
     baked_build_env, build_buzz_agent_provider_defaults, discovery_env_with_baked_floor,
@@ -48,6 +49,13 @@ pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
 }
 
 pub use backend::*;
+// Only `RelayAuthority` is consumed by production code (the record field +
+// its `legacy()` constructor at every call site). The classification API
+// (`classify_field`, `FieldClass`) and `RelayAuthorityEvidence` are exercised
+// solely by `authority`'s own tests via `super::*`, so they need no re-export
+// yet; the not-yet-built migration path will add one when it actually consumes
+// them. No blanket `#[allow(dead_code)]` — unused API stays unexported.
+pub(crate) use authority::RelayAuthority;
 pub use discovery::*;
 pub use env_vars::*;
 #[cfg(windows)]

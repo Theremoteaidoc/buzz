@@ -283,6 +283,7 @@ fn record_with(
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        relay_authority: crate::managed_agents::RelayAuthority::legacy(),
     }
 }
 

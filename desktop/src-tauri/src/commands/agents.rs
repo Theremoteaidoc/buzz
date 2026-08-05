@@ -913,6 +913,7 @@ pub async fn create_managed_agent(
             } else {
                 relay_mesh.clone()
             },
+            relay_authority: crate::managed_agents::RelayAuthority::legacy(),
         };
 
         records.push(record);

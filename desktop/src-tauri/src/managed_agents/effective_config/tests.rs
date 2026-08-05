@@ -92,6 +92,7 @@ fn record(
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
+        relay_authority: crate::managed_agents::RelayAuthority::legacy(),
     }
 }
 

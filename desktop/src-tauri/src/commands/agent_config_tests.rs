@@ -116,6 +116,7 @@ fn agent_record() -> ManagedAgentRecord {
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        relay_authority: crate::managed_agents::RelayAuthority::legacy(),
         agent_command_override: None,
         persona_source_version: None,
         provider: None,
