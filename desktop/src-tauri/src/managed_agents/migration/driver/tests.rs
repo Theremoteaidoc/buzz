@@ -3,8 +3,9 @@
 //! Each test builds a real signed candidate, serializes it into the exact
 //! `request_json` the retention layer would persist, stands up a loopback axum
 //! stub in the shape of the relay's aggregate route, and drives one submission.
-//! The happy path proves a faithful read-back marks the row synced; every
-//! negative path proves the row stays pending with a persisted diagnostic.
+//! The happy path proves a faithful read-back returns evidence while leaving
+//! caller-owned retry state pending; every negative path proves the row stays
+//! pending with a persisted diagnostic.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -253,7 +254,7 @@ fn app_state_at(url: String) -> crate::app_state::AppState {
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn faithful_read_back_marks_exact_generation_synced_and_posts_verbatim() {
+async fn faithful_read_back_returns_evidence_leaves_pending_and_posts_verbatim() {
     let fx = Fixture::new();
     let dir = tempfile::tempdir().expect("tempdir");
     let conn = seeded_conn(&dir, &fx.retained_row());
@@ -275,24 +276,39 @@ async fn faithful_read_back_marks_exact_generation_synced_and_posts_verbatim() {
     .await
     .expect("drive succeeds");
 
-    assert_eq!(
-        outcome,
-        SubmitOutcome::Synced {
-            generation: fx.cas.generation,
-            private_event_id: fx.candidate.signed_event.id.to_hex(),
+    match outcome {
+        SubmitOutcome::Verified { attempt, evidence } => {
+            assert_eq!(attempt.owner_pubkey, fx.owner_hex());
+            assert_eq!(attempt.agent_pubkey, fx.agent_hex());
+            assert_eq!(attempt.generation, fx.cas.generation);
+            assert_eq!(
+                attempt.private_event_id,
+                fx.candidate.signed_event.id.to_hex()
+            );
+            assert_eq!(attempt.state, "active");
+            assert_eq!(evidence.generation, fx.cas.generation);
+            assert_eq!(
+                evidence.head_event_id,
+                fx.candidate.signed_event.id.to_hex()
+            );
         }
-    );
+        other => panic!("expected verified evidence, got {other:?}"),
+    }
 
     // Posted bytes are the retained request verbatim.
     let posted = captured.lock().unwrap().clone().expect("body captured");
     assert_eq!(posted, fx.request_json().into_bytes());
 
-    // The row is no longer pending and carries no error.
-    let confirmed = get_retained_managed_agent_aggregate(&conn, &fx.owner_hex(), &fx.agent_hex())
+    // Transport success is not permission to clear retry. The caller must first
+    // persist authority/cache, then compare-and-clear this exact attempt.
+    let retained = get_retained_managed_agent_aggregate(&conn, &fx.owner_hex(), &fx.agent_hex())
         .unwrap()
         .unwrap();
-    assert!(!confirmed.pending_sync, "verified row is marked synced");
-    assert_eq!(confirmed.last_error, None);
+    assert!(
+        retained.pending_sync,
+        "transport leaves confirmation pending"
+    );
+    assert_eq!(retained.last_error, None);
 }
 
 #[tokio::test]
@@ -393,7 +409,7 @@ async fn tampered_read_back_fails_verification_and_preserves_retry() {
 }
 
 #[tokio::test]
-async fn row_coordinate_disagreeing_with_verified_head_is_not_synced() {
+async fn row_coordinate_disagreeing_with_request_is_rejected_before_egress() {
     // The durable row's (generation, private_event_id) columns are the pair the
     // driver confirms. If they disagree with the request_json the row carries —
     // and thus with the verified read-back — the guard must refuse to mark it
@@ -404,7 +420,7 @@ async fn row_coordinate_disagreeing_with_verified_head_is_not_synced() {
     row.private_event_id = "f".repeat(64); // column diverges from request_json head id
     let conn = seeded_conn(&dir, &row);
 
-    let (url, _captured) = spawn_stub(StubReply {
+    let (url, captured) = spawn_stub(StubReply {
         status: StatusCode::OK,
         body: fx.faithful_response_json().to_string(),
     })
@@ -421,9 +437,10 @@ async fn row_coordinate_disagreeing_with_verified_head_is_not_synced() {
     .await
     .expect("drive resolves");
 
+    assert!(matches!(outcome, SubmitOutcome::Retained { .. }));
     assert!(
-        matches!(outcome, SubmitOutcome::Retained { .. }),
-        "row whose coordinate disagrees with the verified head is not synced"
+        captured.lock().unwrap().is_none(),
+        "coordinate drift must be rejected before network submission"
     );
     let stored = get_retained_managed_agent_aggregate(&conn, &fx.owner_hex(), &fx.agent_hex())
         .unwrap()

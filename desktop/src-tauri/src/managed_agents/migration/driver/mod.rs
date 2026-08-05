@@ -4,10 +4,10 @@
 //! [builder/verifier](super) turns a hydrated record into a signed candidate
 //! and gates the relay read-back; the durable [retention](crate::managed_agents::retention)
 //! layer persists one immutable request per CAS generation. This driver is the
-//! only code that moves a retained request across the wire: it POSTs the exact
-//! retained JSON, verifies the response through [`super::verify_promotion`], and
-//! flips the durable row to synced only when the relay served back a faithful,
-//! owner-signed copy.
+//! only code that moves a retained request across the wire: it validates the
+//! retained row against its exact JSON before egress, POSTs those bytes, and
+//! returns verified evidence plus the immutable attempt identity. The caller
+//! owns authority/cache persistence and only then compare-and-clears the row.
 //!
 //! Design invariants:
 //!   * **Exact bytes on the wire.** The body is `request_json` verbatim — the
@@ -19,24 +19,22 @@
 //!   * **Fresh owner NIP-98 per attempt.** Each submission mints a new
 //!     [`build_nip98_auth_header_for_keys`](crate::relay::build_nip98_auth_header_for_keys)
 //!     header (unique nonce), so a retry never replays a stale token.
-//!   * **Only the exact generation/event is marked synced.** Confirmation binds
-//!     to `(generation, private_event_id)`; a relay that echoes a different
-//!     generation or head id is a verification failure, not a sync.
+//!   * **Caller-owned confirmation.** Successful verification returns the exact
+//!     retained attempt identity. This transport never clears `pending_sync`;
+//!     the caller first persists relay authority/cache and then compare-and-clears.
 //!   * **Errors preserve retry.** Every failure path persists a diagnostic via
 //!     [`record_managed_agent_aggregate_error`](crate::managed_agents::retention::record_managed_agent_aggregate_error)
-//!     and leaves `pending_sync = 1`; nothing here clears retry except a fully
-//!     verified read-back.
+//!     and leaves `pending_sync = 1`.
 
 use nostr::{Event, Keys};
 use reqwest::Method;
 use rusqlite::Connection;
 use serde::Deserialize;
 
-use super::{verify_promotion, AggregateResponse, MigrationCandidate};
+use super::{verify_promotion, AggregateResponse, MigrationCandidate, PromotionEvidence};
 use crate::app_state::AppState;
 use crate::managed_agents::retention::{
-    get_retained_managed_agent_aggregate, mark_managed_agent_aggregate_synced,
-    record_managed_agent_aggregate_error,
+    get_retained_managed_agent_aggregate, record_managed_agent_aggregate_error,
 };
 
 /// The route the relay mounts for atomic PMA aggregate commits. NIP-98 is
@@ -61,16 +59,27 @@ struct RetainedAggregateBody {
     expected_definition_revision: Option<u64>,
 }
 
+/// Immutable identity of the retained attempt that produced verified evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetainedAttempt {
+    pub owner_pubkey: String,
+    pub agent_pubkey: String,
+    pub generation: u64,
+    pub private_event_id: String,
+    pub state: String,
+}
+
 /// What one drive of a retained aggregate resolved to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // Consumed by the boot/reconcile lane (sibling); today only tests read it.
 pub(crate) enum SubmitOutcome {
     /// No pending aggregate row for this agent — nothing to submit.
     Nothing,
-    /// The relay served back a faithful copy and the row was marked synced.
-    Synced {
-        generation: u64,
-        private_event_id: String,
+    /// The relay served back a faithful active aggregate. Persistence and
+    /// compare-and-clear remain the caller's responsibility.
+    Verified {
+        attempt: RetainedAttempt,
+        evidence: PromotionEvidence,
     },
     /// The attempt failed; a diagnostic was persisted and retry is preserved.
     Retained { error: String },
@@ -78,11 +87,12 @@ pub(crate) enum SubmitOutcome {
 
 /// Submit (or retry) the latest retained aggregate for one owner→agent pair.
 ///
-/// Reads the durable row, POSTs its exact `request_json` with fresh owner-signed
-/// NIP-98 auth, strict-deserializes the response, verifies it against the
-/// candidate reconstructed from the same bytes, and — only on a fully verified
-/// read-back — marks that exact generation/event synced. Every failure persists
-/// an exact-attempt diagnostic without clearing retry.
+/// Reads the durable row, validates it against its strict `request_json` before
+/// any network I/O, POSTs those exact bytes with fresh owner-signed NIP-98 auth,
+/// strict-deserializes and verifies the response, then returns evidence with the
+/// exact attempt identity. Every failure persists an exact-attempt diagnostic;
+/// success deliberately leaves retry pending for caller-owned persistence and
+/// compare-and-clear ordering.
 #[allow(dead_code)] // Consumed by the boot/reconcile lane (sibling); exercised by this module's tests.
 pub(crate) async fn submit_retained_aggregate(
     state: &AppState,
@@ -116,15 +126,25 @@ pub(crate) async fn submit_retained_aggregate(
         Ok(SubmitOutcome::Retained { error })
     };
 
-    let response = match submit_to_relay(state, owner_keys, row.request_json.as_bytes()).await {
-        Ok(response) => response,
-        Err(error) => return record_failure(error),
-    };
-
-    // Reconstruct the verification source from the *same bytes* we sent, so the
-    // candidate and the wire request can never diverge.
     let candidate = match reconstruct_candidate(row.request_json.as_bytes(), owner_keys) {
         Ok(candidate) => candidate,
+        Err(error) => return record_failure(error),
+    };
+    if row.state != "active"
+        || candidate.payload.state != buzz_core_pkg::private_managed_agent::State::Active
+        || candidate.payload.generation != generation
+        || candidate.signed_event.id.to_hex() != private_event_id
+        || candidate.payload.owner_pubkey != owner_pubkey
+        || candidate.payload.agent_pubkey != agent_pubkey
+    {
+        return record_failure(
+            "retained active request does not match its owner/agent/generation/event/state coordinate"
+                .to_string(),
+        );
+    }
+
+    let response = match submit_to_relay(state, owner_keys, row.request_json.as_bytes()).await {
+        Ok(response) => response,
         Err(error) => return record_failure(error),
     };
 
@@ -144,22 +164,16 @@ pub(crate) async fn submit_retained_aggregate(
         ));
     }
 
-    match mark_managed_agent_aggregate_synced(
-        conn,
-        owner_pubkey,
-        agent_pubkey,
-        generation,
-        &private_event_id,
-    ) {
-        Ok(true) => Ok(SubmitOutcome::Synced {
+    Ok(SubmitOutcome::Verified {
+        attempt: RetainedAttempt {
+            owner_pubkey: row.owner_pubkey,
+            agent_pubkey: row.agent_pubkey,
             generation,
             private_event_id,
-        }),
-        // The row moved under us (superseded by a newer generation) between read
-        // and confirm. Nothing verified was lost; the newer row drives next.
-        Ok(false) => Ok(SubmitOutcome::Nothing),
-        Err(error) => Err(error),
-    }
+            state: row.state,
+        },
+        evidence,
+    })
 }
 
 /// POST the exact request bytes with fresh owner-signed NIP-98 auth and
@@ -208,11 +222,25 @@ fn reconstruct_candidate(body: &[u8], owner_keys: &Keys) -> Result<MigrationCand
         .instance_event
         .ok_or_else(|| "retained request is missing its instance projection".to_string())?;
 
+    let expected_definition_revision = parsed.expected_definition_revision.ok_or_else(|| {
+        "retained active request is missing expected_definition_revision".to_string()
+    })?;
     let (_, payload) = buzz_core_pkg::private_managed_agent::validate_and_decrypt(
         &parsed.private_event,
         owner_keys,
     )
     .map_err(|e| format!("retained head does not decrypt under the owner key: {e}"))?;
+    let payload_revision = payload
+        .active
+        .as_ref()
+        .ok_or_else(|| "retained active request head has no active payload".to_string())?
+        .definition
+        .revision;
+    if expected_definition_revision != payload_revision {
+        return Err(format!(
+            "retained expected definition revision {expected_definition_revision} does not match head {payload_revision}"
+        ));
+    }
 
     Ok(MigrationCandidate {
         signed_event: parsed.private_event,
