@@ -80,33 +80,47 @@ NIP-33 LWW is explicitly insufficient.
 - transient local only: PID and all last start/stop/exit/error receipts/logs.
 
 Adding a `ManagedAgentRecord` field must update an exhaustive Desktop
-classification/conversion fixture before migration-writing code can merge.
-This inert core-only reservation does not yet depend on the Desktop type and
-therefore does not claim to provide that compile-time tripwire.
+classification/conversion fixture before migration-writing code can merge. The
+fixture is part of the relay-authority follow-up and fails when a durable field
+has no explicit private, projection, local/derived, or transient classification.
 
 ## Aggregate submission boundary
 
 Three ordinary Nostr `EVENT` writes cannot atomically commit an aggregate. The
-future relay contract accepts independently signed projection candidates plus
-the signed private head through one authenticated aggregate submission and one
-PostgreSQL transaction. It validates CAS predecessor/generation, signatures,
-hashes, recovery material, definition revision, tombstone watermark, and all
-coordinates before exposing any candidate. Fan-out begins only after commit.
+relay contract accepts independently signed projection candidates plus the
+signed encrypted private head through one authenticated aggregate submission
+and one PostgreSQL transaction. The relay validates the outer envelope, owner
+and agent coordinates, signed public candidates, relay-owned definition
+revision, and CAS predecessor/generation before exposing any candidate. Fan-out
+begins only after commit.
 
-Public catalog definitions require an independently verifiable public
-CAS/revision head; browsing must never require decrypting kind `30179`.
+The relay cannot decrypt kind `30179` and MUST NOT receive the plaintext payload
+or agent nsec. It therefore cannot prove that ciphertext-internal bindings match
+the co-submitted public projections. It records the exact submitted projections
+as the active bindings; Desktop performs the integrity gate by decrypting a
+writer-consistent read-back and verifying those bindings before promoting the
+agent to relay-authoritative state.
+
+A definition edit shared by multiple authoritative agents advances each agent's
+aggregate independently. Agents may transiently pin different revisions of the
+same definition coordinate; each immutable aggregate revision retains its exact
+bound recovery bytes while catalog browsing reads the latest active public
+projection. Browsing never requires decrypting kind `30179`.
 
 ## Required deployment order
 
-1. this inert codec/kind reservation while ingest still rejects `30179`;
-2. author-only privacy gates, SQL visibility before `LIMIT`, and verification
-   that the positive FTS allowlist continues to exclude `30179`;
-3. dark CAS schema/transaction;
-4. feature-gated aggregate submission;
-5. read/repair/export/import and destructive restore drill;
-6. tombstone revocation across authentication/ingest/session caches;
-7. owner rotation epoch/freeze/receipts/activation;
-8. Desktop reader and verified dual-write migration.
+1. **Inert reservation:** codec and kind reservation while generic ingest still
+   rejects `30179` (shipped in #4593).
+2. **Relay-authority release:** author-only pre-pagination privacy and FTS gates,
+   transactional CAS/authority storage, capability-advertised aggregate
+   submission, tombstone revocation across every transport, and the Desktop
+   reader with verified migration. Desktop keeps every agent `LegacyOnly` when
+   the relay does not advertise the aggregate capability. Promotion requires a
+   crash-safe writer-consistent decrypt-and-binding verification; PostgreSQL
+   backup covers the authority tables and bound recovery bytes as one
+   consistency domain.
+3. **Independent later capabilities:** export/import and restore drills, owner
+   rotation, and physical legacy cleanup.
 
-No phase may publish secrets before step 2 or retire local recovery evidence
-before the complete migration exit gate passes.
+No phase may publish secrets before the privacy gates are active or retire local
+recovery evidence before the complete migration exit gate passes.
