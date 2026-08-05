@@ -448,6 +448,67 @@ fn verify_rejects_wrong_definition_revision() {
 }
 
 #[test]
+fn tombstone_advances_verified_head_without_active_payload() {
+    let owner = Keys::generate();
+    let agent = Keys::generate();
+    let previous = EventBuilder::new(Kind::TextNote, "previous")
+        .sign_with_keys(&owner)
+        .unwrap();
+    let timestamp = "2026-08-05T18:00:00Z";
+
+    let event = build_tombstone_event(
+        &owner,
+        &agent.public_key().to_hex(),
+        7,
+        &previous.id.to_hex(),
+        timestamp,
+        CREATED_AT,
+    )
+    .unwrap();
+    let (envelope, payload) =
+        buzz_core_pkg::private_managed_agent::validate_and_decrypt(&event, &owner).unwrap();
+    assert_eq!(envelope.generation, 8);
+    assert_eq!(
+        envelope.previous_event_id.map(|id| id.to_hex()),
+        Some(previous.id.to_hex())
+    );
+    assert_eq!(
+        payload.state,
+        buzz_core_pkg::private_managed_agent::State::Deleted
+    );
+    assert!(payload.active.is_none());
+    assert_eq!(payload.deleted_at.as_deref(), Some(timestamp));
+    assert_eq!(payload.updated_at, timestamp);
+}
+
+#[test]
+fn tombstone_rejects_invalid_coordinate_or_generation_overflow() {
+    let owner = Keys::generate();
+    assert!(matches!(
+        build_tombstone_event(
+            &owner,
+            "invalid",
+            1,
+            &"11".repeat(32),
+            "2026-08-05T18:00:00Z",
+            CREATED_AT
+        ),
+        Err(MigrationError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        build_tombstone_event(
+            &owner,
+            &Keys::generate().public_key().to_hex(),
+            u64::MAX,
+            &"11".repeat(32),
+            "2026-08-05T18:00:00Z",
+            CREATED_AT,
+        ),
+        Err(MigrationError::InvalidInput(_))
+    ));
+}
+
+#[test]
 fn verify_rejects_stale_generation_head() {
     let fx = Fixture::new();
     let candidate = fx.build().expect("candidate builds");

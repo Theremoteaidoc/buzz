@@ -157,6 +157,42 @@ pub struct PromotionEvidence {
     pub definition_revision: u64,
 }
 
+/// Build the next minimal deleted aggregate from verified relay-head evidence.
+///
+/// A tombstone carries no public projections or private active body. It advances
+/// the same CAS chain by exactly one and is signed by the owner, so deletion can
+/// use the aggregate route rather than legacy kind:5 mutation.
+#[allow(dead_code)] // Consumed by the aggregate deletion driver in the next slice.
+pub fn build_tombstone_event(
+    owner_keys: &Keys,
+    agent_pubkey: &str,
+    current_generation: u64,
+    current_private_event_id: &str,
+    timestamp: &str,
+    created_at: u64,
+) -> Result<Event, MigrationError> {
+    let agent = parse_pubkey("agent_pubkey", agent_pubkey)?;
+    let previous = nostr::EventId::from_hex(current_private_event_id)
+        .map_err(|e| MigrationError::InvalidInput(format!("private event id: {e}")))?;
+    let generation = current_generation
+        .checked_add(1)
+        .ok_or_else(|| MigrationError::InvalidInput("aggregate generation overflow".into()))?;
+    let payload = Payload {
+        format: pma::FORMAT.to_string(),
+        version: pma::VERSION,
+        agent_pubkey: agent.to_hex(),
+        owner_pubkey: owner_keys.public_key().to_hex(),
+        generation,
+        previous_event_id: Some(previous.to_hex()),
+        state: State::Deleted,
+        updated_at: timestamp.to_string(),
+        active: None,
+        deleted_at: Some(timestamp.to_string()),
+        extensions: Default::default(),
+    };
+    pma::build_event(owner_keys, &payload, created_at).map_err(MigrationError::from)
+}
+
 /// Build a signed, inert kind:30179 migration candidate for one agent.
 ///
 /// Assembles the encrypted aggregate payload from the record + keys + exact
