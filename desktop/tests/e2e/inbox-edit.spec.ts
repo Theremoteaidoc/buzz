@@ -12,6 +12,16 @@ const EMPTY_DELETE_REPLY_ID = "b2".repeat(32);
 const EMPTY_DELETE_ROOT_CONTENT = "Inbox empty-edit root message.";
 const EMPTY_DELETE_REPLY_CONTENT =
   "Selected Inbox reply remains after root deletion.";
+const COLD_ROOT_ID = "c3".repeat(32);
+const COLD_SELECTED_REPLY_ID = "f4".repeat(32);
+const COLD_DELETED_EDIT_ID = "0a".repeat(32);
+const COLD_SIBLING_REPLY_ID = "1b".repeat(32);
+const COLD_SIBLING_EDIT_ID = "2c".repeat(32);
+const COLD_ROOT_CONTENT = "Cold Inbox thread root.";
+const COLD_SELECTED_ORIGINAL_CONTENT = "Cold Inbox reply original text.";
+const COLD_SELECTED_RETRACTED_CONTENT = "Cold Inbox reply retracted edit text.";
+const COLD_SIBLING_ORIGINAL_CONTENT = "Cold Inbox sibling reply original text.";
+const COLD_SIBLING_EDITED_CONTENT = "Cold Inbox sibling reply edited text.";
 const ATTACHMENT_URL = `https://mock.relay/media/${"a".repeat(64)}.pdf`;
 const ATTACHMENT_FILENAME = "inbox-edit-proof.pdf";
 const SHOTS = "test-results/inbox-edit";
@@ -40,6 +50,8 @@ type MockWindow = Window & {
     pubkey?: string;
     mentionPubkeys?: string[];
     id?: string;
+    kind?: number;
+    extraTags?: string[][];
   }) => {
     content: string;
     created_at: number;
@@ -497,4 +509,142 @@ test("cancelling an empty Inbox edit deletion preserves content and edit mode", 
         ).length,
     ),
   ).toBe(0);
+});
+
+// Regression test for the cold Inbox hydration closure. A deletion can target
+// an edit event instead of the original message, and `formatTimelineMessages`
+// drops an edit only when the edit's own id is in the deletion set. A one-hop
+// `#e` fetch over the context message ids returns the edit but not the deletion
+// of that edit, so a cold Inbox open re-applies retracted content. The sibling
+// reply is the positive control: its live edit is NOT deleted, so it must still
+// render as edited after the same cold fetch.
+test("cold Inbox open drops an edit that was itself deleted", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await page.waitForFunction(() => {
+    const win = window as MockWindow;
+    return (
+      typeof win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function"
+    );
+  });
+
+  await page.evaluate(
+    ({
+      channelId,
+      currentPubkey,
+      deletedEditId,
+      rootContent,
+      rootId,
+      selectedOriginalContent,
+      selectedReplyId,
+      selectedRetractedContent,
+      siblingEditId,
+      siblingEditedContent,
+      siblingOriginalContent,
+      siblingReplyId,
+    }) => {
+      const win = window as MockWindow;
+      const emit = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      const push = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!emit || !push) {
+        throw new Error("Mock bridge helpers are unavailable.");
+      }
+
+      const root = emit({
+        channelName: "general",
+        content: rootContent,
+        id: rootId,
+        pubkey: currentPubkey,
+      });
+      const selectedReply = emit({
+        channelName: "general",
+        content: selectedOriginalContent,
+        id: selectedReplyId,
+        mentionPubkeys: [currentPubkey],
+        parentEventId: root.id,
+        pubkey: currentPubkey,
+      });
+      const siblingReply = emit({
+        channelName: "general",
+        content: siblingOriginalContent,
+        id: siblingReplyId,
+        parentEventId: root.id,
+        pubkey: currentPubkey,
+      });
+
+      // The retracted edit: published, then deleted by a kind:5 that targets
+      // the EDIT event, never the reply itself.
+      const retractedEdit = emit({
+        channelName: "general",
+        content: selectedRetractedContent,
+        extraTags: [["e", selectedReply.id]],
+        id: deletedEditId,
+        kind: 40003,
+        pubkey: currentPubkey,
+      });
+      emit({
+        channelName: "general",
+        content: "",
+        extraTags: [["e", retractedEdit.id]],
+        kind: 5,
+        pubkey: currentPubkey,
+      });
+
+      // Positive control: a live edit with no deletion of its own.
+      emit({
+        channelName: "general",
+        content: siblingEditedContent,
+        extraTags: [["e", siblingReply.id]],
+        id: siblingEditId,
+        kind: 40003,
+        pubkey: currentPubkey,
+      });
+
+      push({
+        category: "mention",
+        channel_id: channelId,
+        channel_name: "general",
+        content: selectedReply.content,
+        created_at: selectedReply.created_at,
+        id: selectedReply.id,
+        kind: selectedReply.kind,
+        pubkey: selectedReply.pubkey,
+        tags: selectedReply.tags,
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      currentPubkey: CURRENT_PUBKEY,
+      deletedEditId: COLD_DELETED_EDIT_ID,
+      rootContent: COLD_ROOT_CONTENT,
+      rootId: COLD_ROOT_ID,
+      selectedOriginalContent: COLD_SELECTED_ORIGINAL_CONTENT,
+      selectedReplyId: COLD_SELECTED_REPLY_ID,
+      selectedRetractedContent: COLD_SELECTED_RETRACTED_CONTENT,
+      siblingEditId: COLD_SIBLING_EDIT_ID,
+      siblingEditedContent: COLD_SIBLING_EDITED_CONTENT,
+      siblingOriginalContent: COLD_SIBLING_ORIGINAL_CONTENT,
+      siblingReplyId: COLD_SIBLING_REPLY_ID,
+    },
+  );
+
+  // First selection of this item: every edit and deletion must come from the
+  // hydration fetch, not from an optimistic local write.
+  await page.getByTestId(`home-inbox-item-${COLD_SELECTED_REPLY_ID}`).click();
+  const detail = page.getByTestId("home-inbox-detail");
+  const siblingRow = detail.locator(
+    `[data-message-id="${COLD_SIBLING_REPLY_ID}"]`,
+  );
+  await expect(siblingRow).toContainText(COLD_SIBLING_EDITED_CONTENT);
+
+  const selectedRow = detail.locator(
+    `[data-message-id="${COLD_SELECTED_REPLY_ID}"]`,
+  );
+  await expect(selectedRow).toContainText(COLD_SELECTED_ORIGINAL_CONTENT);
+  await expect(selectedRow).not.toContainText(COLD_SELECTED_RETRACTED_CONTENT);
+  await expect(detail).not.toContainText(COLD_SELECTED_RETRACTED_CONTENT);
 });

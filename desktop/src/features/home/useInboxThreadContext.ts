@@ -2,12 +2,10 @@ import * as React from "react";
 
 import { isInboxThreadContextEvent } from "@/features/home/lib/inboxViewHelpers";
 import { relayEventFromFeedItem } from "@/features/home/lib/inbox";
+import { fetchStructuralAuxForMessages } from "@/features/messages/lib/auxBackfill";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
-import {
-  buildChannelReactionAuxFilter,
-  buildChannelStructuralAuxFilter,
-} from "@/shared/api/relayChannelFilters";
+import { buildChannelReactionAuxFilter } from "@/shared/api/relayChannelFilters";
 import { getEventById } from "@/shared/api/tauri";
 import type { FeedItem, RelayEvent } from "@/shared/api/types";
 import {
@@ -282,11 +280,12 @@ export function useInboxThreadContext(
     }
 
     try {
-      return await relayClient.fetchAuxEventsByReference(
-        selectedChannelId,
-        eventIds,
-        buildChannelStructuralAuxFilter,
-      );
+      // Two hops, not one. A deletion can target an edit event rather than the
+      // original message, and `formatTimelineMessages` drops an edit only when
+      // the edit's own id is in the deletion set. A one-hop fetch therefore
+      // re-applies retracted content on a cold Inbox open. The channel and
+      // thread paths already resolve this closure with the same helper.
+      return await fetchStructuralAuxForMessages(selectedChannelId, eventIds);
     } catch (error) {
       console.error(
         "Failed to hydrate structural events for Inbox context messages",
