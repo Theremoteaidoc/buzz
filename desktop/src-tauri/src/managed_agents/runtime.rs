@@ -35,6 +35,7 @@ pub(crate) use sweep::sweep_untracked_bundle_harnesses;
 
 type RespondToEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
 
+mod claude_settings;
 mod process;
 #[cfg(test)]
 use process::{
@@ -557,7 +558,8 @@ pub fn spawn_agent_child(
     );
 
     let mut command = std::process::Command::new(&resolved_acp_command);
-    if let Some(home) = super::default_agent_workdir() {
+    let agent_workdir = super::default_agent_workdir();
+    if let Some(home) = &agent_workdir {
         command.current_dir(home);
     }
     command.stdin(std::process::Stdio::null());
@@ -583,6 +585,7 @@ pub fn spawn_agent_child(
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
     let runtime_meta = known_acp_runtime(effective_command);
+    claude_settings::configure(runtime_meta, agent_workdir.as_deref());
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }
