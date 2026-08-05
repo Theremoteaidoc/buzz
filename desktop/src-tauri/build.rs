@@ -1,6 +1,9 @@
 // Shared schema, included from the same source the runtime command parses with,
 // so the build-time validation below and the runtime parse cannot drift.
 include!("src/commands/reconnect_hook_config.rs");
+// Same source of truth the runtime filters with, so a baked build env cannot
+// carry a reserved key the runtime believes it already rejected.
+include!("src/managed_agents/reserved_env_keys.rs");
 
 use base64::Engine as _;
 
@@ -64,6 +67,20 @@ fn main() {
                     "BUZZ_BUILD_AGENT_ENV line {}: key must not be empty in {:?}",
                     line_no + 1,
                     line
+                );
+            }
+            // The baked env is written into every spawned agent's environment
+            // LAST (see `managed_agents/runtime.rs`), after Buzz sets the
+            // access gates and identity vars. A baked reserved key would
+            // therefore silently override the gate the UI promises, so reject
+            // it at build time instead of shipping a binary that bypasses its
+            // own enforcement.
+            if is_reserved_env_key(key) {
+                panic!(
+                    "BUZZ_BUILD_AGENT_ENV line {}: `{}` is reserved by Buzz and cannot be baked \
+                     into a build (it would override Buzz's own identity/access env)",
+                    line_no + 1,
+                    key
                 );
             }
         }
