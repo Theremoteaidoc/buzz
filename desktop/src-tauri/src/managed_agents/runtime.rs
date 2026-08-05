@@ -556,7 +556,6 @@ pub fn spawn_agent_child(
         login_shell_path(),
         nvm_bin,
     );
-
     let mut command = std::process::Command::new(&resolved_acp_command);
     let agent_workdir = super::default_agent_workdir();
     if let Some(home) = &agent_workdir {
@@ -582,8 +581,6 @@ pub fn spawn_agent_child(
             command.env("BUZZ_ACP_MCP_COMMAND", "");
         }
     }
-    // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
-    // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
     let runtime_meta = known_acp_runtime(effective_command);
     claude_settings::configure(runtime_meta, agent_workdir.as_deref());
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
