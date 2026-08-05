@@ -1857,6 +1857,19 @@ mod tests {
     }
 
     #[test]
+    fn private_managed_agent_filters_always_receive_author_only_pushdown() {
+        let explicit = Filter::new().kind(nostr::Kind::Custom(30_179));
+        let mixed = Filter::new().kinds([nostr::Kind::TextNote, nostr::Kind::Custom(30_179)]);
+        let kindless = Filter::new().id(nostr::EventId::from_hex(&"11".repeat(32)).unwrap());
+        let public_only = Filter::new().kind(nostr::Kind::TextNote);
+
+        assert!(filter_can_match_author_only_kinds(&explicit));
+        assert!(filter_can_match_author_only_kinds(&mixed));
+        assert!(filter_can_match_author_only_kinds(&kindless));
+        assert!(!filter_can_match_author_only_kinds(&public_only));
+    }
+
+    #[test]
     fn mixed_filter_omits_another_authors_push_lease() {
         let owner_keys = nostr::Keys::generate();
         let reader_keys = nostr::Keys::generate();
