@@ -651,6 +651,84 @@ mod tests {
         let race_heads: i64 = sqlx::query_scalar("SELECT count(*) FROM managed_agent_heads WHERE community_id=$1 AND owner_pubkey=$2 AND agent_pubkey IN ($3,$4)")
             .bind(community.as_uuid()).bind(owner.public_key().to_bytes()).bind(race_agent_a.public_key().to_bytes()).bind(race_agent_b.public_key().to_bytes()).fetch_one(&pool).await.unwrap();
         assert_eq!(race_heads, 1);
+
+        // Deletion advances the same private CAS chain, returns no public
+        // bindings, and retires the instance projection. Neither a stale
+        // pre-tombstone aggregate nor ordinary projection ingest may resurrect
+        // an authority coordinate after the tombstone commits.
+        let tombstone_private = private_head(
+            &owner,
+            &first_agent,
+            3,
+            Some(&first_v2.private_event.id),
+            "deleted",
+        );
+        let tombstone = AggregateRequest {
+            private_event: tombstone_private.clone(),
+            definition_event: None,
+            instance_event: None,
+            expected_definition_revision: None,
+        };
+        let deleted = commit_aggregate(&pool, community, &tombstone)
+            .await
+            .unwrap();
+        assert!(deleted.inserted);
+        assert!(!deleted.head.active);
+        assert_eq!(deleted.head.generation, 3);
+        assert_eq!(deleted.private_event, tombstone_private);
+        assert_eq!(deleted.definition_event, None);
+        assert_eq!(deleted.instance_event, None);
+        assert_eq!(deleted.definition_revision, None);
+
+        let instance_live: bool = sqlx::query_scalar(
+            "SELECT deleted_at IS NULL FROM events WHERE community_id=$1 AND id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(first_v2.instance_event.as_ref().unwrap().id.to_bytes())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!instance_live);
+        assert!(
+            projection_is_authoritative(
+                &pool,
+                community,
+                first_v2.instance_event.as_ref().unwrap(),
+                &first_agent.public_key().to_hex(),
+            )
+            .await
+            .unwrap(),
+            "deleted heads retain the authority fence"
+        );
+
+        let stale_resurrection = AggregateRequest {
+            private_event: private_head(
+                &owner,
+                &first_agent,
+                3,
+                Some(&first_v2.private_event.id),
+                "active",
+            ),
+            definition_event: Some(definition_v1),
+            instance_event: first_v2.instance_event,
+            expected_definition_revision: Some(1),
+        };
+        assert!(matches!(
+            commit_aggregate(&pool, community, &stale_resurrection).await,
+            Err(DbError::ManagedAgentConflict(message))
+                if message.contains("predecessor or generation conflict")
+        ));
+        let head = read_head(
+            &pool,
+            community,
+            &owner.public_key().to_bytes(),
+            &first_agent.public_key().to_bytes(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(head.generation, 3);
+        assert!(!head.active);
     }
 
     #[test]
