@@ -824,12 +824,19 @@ async fn submit_event_authed(
         }
     };
     if let Some(owner) = nip_oa_owner {
-        super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
+        if !super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await {
+            let e = internal_error("verified NIP-OA owner could not be materialized");
+            return SubmitOutcome::Err {
+                status: e.0,
+                response: e,
+            };
+        }
     }
 
     let kind_u32 = buzz_core::kind::event_kind_u32(&event);
     let auth = IngestAuth::Http {
         pubkey,
+        agent_owner_pubkey: nip_oa_owner,
         scopes: buzz_auth::Scope::all_known(), // Pure Nostr: full scopes, channel access via membership
         auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
     };

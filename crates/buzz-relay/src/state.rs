@@ -1050,6 +1050,33 @@ impl AppState {
         closed
     }
 
+    /// Disconnect a pubkey locally and await publication to every relay pod.
+    ///
+    /// PMA tombstone APIs use this stricter variant so a committed deletion can
+    /// return retryably when propagation fails; an exact retry republishes.
+    pub async fn disconnect_pubkey_clusterwide_awaited(
+        &self,
+        tenant: &TenantContext,
+        pubkey: &[u8],
+        event_id: &str,
+        reason: &str,
+    ) -> Result<usize, buzz_pubsub::PubSubError> {
+        let closed =
+            self.conn_manager
+                .disconnect_pubkey(tenant.community(), pubkey, event_id, reason);
+        self.pubsub
+            .publish_conn_control(
+                tenant,
+                &ConnControl::DisconnectPubkey {
+                    pubkey: pubkey.to_vec(),
+                    event_id: event_id.to_string(),
+                    reason: reason.to_string(),
+                },
+            )
+            .await?;
+        Ok(closed)
+    }
+
     /// Disconnect a community locally and publish the command to every relay pod.
     ///
     /// Publication is awaited so the archive API can distinguish durable state

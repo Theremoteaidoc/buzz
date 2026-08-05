@@ -55,6 +55,31 @@ pub mod relay_members {
         Denied,
     }
 
+    fn verified_nip_oa_owner(
+        allow_nip_oa_auth: bool,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+    ) -> Option<nostr::PublicKey> {
+        if !allow_nip_oa_auth {
+            return None;
+        }
+        let tag_json = auth_tag_header?;
+        let agent_pubkey = nostr::PublicKey::from_slice(pubkey_bytes).ok()?;
+        match buzz_sdk::nip_oa::verify_auth_tag(tag_json, &agent_pubkey) {
+            Ok(owner) => Some(owner),
+            Err(e) => {
+                info!(agent = %agent_pubkey.to_hex(), "NIP-OA auth tag invalid: {e}");
+                None
+            }
+        }
+    }
+
+    fn open_relay_decision(verified_owner: Option<nostr::PublicKey>) -> MembershipDecision {
+        verified_owner
+            .map(MembershipDecision::ViaOwner)
+            .unwrap_or(MembershipDecision::OpenRelay)
+    }
+
     /// Check relay membership without committing to an HTTP response shape.
     ///
     /// `community` is the server-resolved tenant of the request; membership is
@@ -65,11 +90,31 @@ pub mod relay_members {
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
     ) -> Result<MembershipDecision, String> {
-        if !state.config.require_relay_membership {
-            return Ok(MembershipDecision::OpenRelay);
+        let pubkey_hex = hex::encode(pubkey_bytes);
+        let verified_owner = verified_nip_oa_owner(
+            !state.config.require_relay_membership || state.config.allow_nip_oa_auth,
+            pubkey_bytes,
+            auth_tag_header,
+        );
+        let revoked = state
+            .db
+            .managed_agent_participation_is_revoked(
+                community,
+                pubkey_bytes,
+                verified_owner
+                    .as_ref()
+                    .map(|owner| owner.as_bytes().as_slice()),
+            )
+            .await
+            .map_err(|e| format!("managed-agent participation check failed: {e}"))?;
+        if revoked {
+            return Ok(MembershipDecision::Denied);
         }
 
-        let pubkey_hex = hex::encode(pubkey_bytes);
+        if !state.config.require_relay_membership {
+            return Ok(open_relay_decision(verified_owner));
+        }
+
         let is_member = state
             .db
             .is_relay_member(community, &pubkey_hex)
@@ -80,30 +125,20 @@ pub mod relay_members {
         }
 
         if state.config.allow_nip_oa_auth {
-            if let Some(tag_json) = auth_tag_header {
-                let agent_pubkey = nostr::PublicKey::from_slice(pubkey_bytes)
-                    .map_err(|e| format!("invalid agent pubkey for NIP-OA check: {e}"))?;
-
-                match buzz_sdk::nip_oa::verify_auth_tag(tag_json, &agent_pubkey) {
-                    Ok(owner_pubkey) => {
-                        let owner_hex = owner_pubkey.to_hex();
-                        let owner_is_member = state
-                            .db
-                            .is_relay_member(community, &owner_hex)
-                            .await
-                            .map_err(|e| format!("relay membership check (owner) failed: {e}"))?;
-                        if owner_is_member {
-                            debug!(
-                                agent = %pubkey_hex,
-                                owner = %owner_hex,
-                                "NIP-OA membership granted via owner"
-                            );
-                            return Ok(MembershipDecision::ViaOwner(owner_pubkey));
-                        }
-                    }
-                    Err(e) => {
-                        info!(agent = %pubkey_hex, "NIP-OA auth tag invalid: {e}");
-                    }
+            if let Some(owner_pubkey) = verified_owner {
+                let owner_hex = owner_pubkey.to_hex();
+                let owner_is_member = state
+                    .db
+                    .is_relay_member(community, &owner_hex)
+                    .await
+                    .map_err(|e| format!("relay membership check (owner) failed: {e}"))?;
+                if owner_is_member {
+                    debug!(
+                        agent = %pubkey_hex,
+                        owner = %owner_hex,
+                        "NIP-OA membership granted via owner"
+                    );
+                    return Ok(MembershipDecision::ViaOwner(owner_pubkey));
                 }
             }
         }
@@ -116,9 +151,9 @@ pub mod relay_members {
     /// Returns `Ok(Some(owner_pubkey))` when the agent is not a direct member but
     /// its NIP-OA owner *is* — access is granted via delegation.
     ///
-    /// On open relays (`require_relay_membership = false`), returns `Ok(None)`
-    /// immediately — no membership check is performed. Callers that need NIP-OA
-    /// owner extraction on open relays should call [`extract_nip_oa_owner`] directly.
+    /// On open relays (`require_relay_membership = false`), returns a verified
+    /// NIP-OA owner unconditionally for durable backfill. The feature flag only
+    /// controls whether delegation can grant access on a closed relay.
     ///
     /// Returns `Ok(None)` when the caller is a direct member (closed relay) or when
     /// no NIP-OA tag is present/applicable (open relay without auth tag).
@@ -237,6 +272,35 @@ pub mod relay_members {
         use super::*;
         use buzz_sdk::nip_oa::compute_auth_tag;
         use nostr::Keys;
+
+        #[test]
+        fn closed_relay_disabled_nip_oa_does_not_supply_policy_owner_evidence() {
+            let owner = Keys::generate();
+            let agent = Keys::generate();
+            let tag = compute_auth_tag(&owner, &agent.public_key(), "").unwrap();
+            assert_eq!(
+                verified_nip_oa_owner(false, agent.public_key().as_bytes(), Some(&tag)),
+                None
+            );
+            assert_eq!(
+                verified_nip_oa_owner(true, agent.public_key().as_bytes(), Some(&tag)),
+                Some(owner.public_key())
+            );
+            assert_eq!(
+                verified_nip_oa_owner(true, agent.public_key().as_bytes(), Some("invalid")),
+                None
+            );
+        }
+
+        #[test]
+        fn open_relay_extracts_owner_regardless_of_closed_relay_feature_flag() {
+            let owner = Keys::generate().public_key();
+            assert_eq!(
+                open_relay_decision(Some(owner)),
+                MembershipDecision::ViaOwner(owner)
+            );
+            assert_eq!(open_relay_decision(None), MembershipDecision::OpenRelay);
+        }
 
         /// Valid NIP-OA auth tag → returns Some(owner_pubkey).
         #[test]

@@ -4788,6 +4788,16 @@ impl Db {
         managed_agent::commit_aggregate(&self.pool, community_id, request).await
     }
 
+    /// Whether an owner-bound deleted PMA head revokes this principal.
+    pub async fn managed_agent_participation_is_revoked(
+        &self,
+        community_id: CommunityId,
+        agent: &[u8],
+        proven_owner: Option<&[u8]>,
+    ) -> Result<bool> {
+        managed_agent::participation_is_revoked(&self.pool, community_id, agent, proven_owner).await
+    }
+
     /// Whether an ordinary projection targets PMA-authoritative state.
     pub async fn managed_agent_projection_is_authoritative(
         &self,

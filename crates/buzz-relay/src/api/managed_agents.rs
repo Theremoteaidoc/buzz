@@ -100,6 +100,23 @@ pub async fn submit_aggregate(
             }
             _ => internal_error(&format!("managed-agent aggregate commit failed: {e}")),
         })?;
+    if !commit.head.active {
+        state
+            .disconnect_pubkey_clusterwide_awaited(
+                &tenant,
+                &commit.head.agent_pubkey,
+                &hex::encode(&commit.head.event_id),
+                "blocked: managed agent has been deleted",
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "managed-agent disconnect publication failed after durable tombstone commit");
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "managed-agent deletion committed; disconnect propagation failed, retry request",
+                )
+            })?;
+    }
     let owner_hex = owner.to_hex();
     for stored in &commit.events {
         crate::handlers::event::dispatch_persistent_event(

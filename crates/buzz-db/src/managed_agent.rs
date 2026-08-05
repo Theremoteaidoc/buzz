@@ -424,6 +424,37 @@ pub async fn read_head(
     .transpose()
 }
 
+/// Whether a principal is revoked by a deleted PMA head in this community.
+///
+/// `proven_owner` is cryptographically verified NIP-OA evidence from the
+/// current request. The durable user mapping is checked as an independent
+/// owner binding so a caller cannot bypass an existing tombstone by presenting
+/// a second delegation. Rows belonging only to unrelated owners or communities
+/// never revoke the principal.
+pub async fn participation_is_revoked(
+    pool: &PgPool,
+    community: CommunityId,
+    agent: &[u8],
+    proven_owner: Option<&[u8]>,
+) -> Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(\
+             SELECT 1 FROM managed_agent_heads h \
+              WHERE h.community_id=$1 AND h.agent_pubkey=$2 AND h.state='deleted' \
+                AND (h.owner_pubkey=$3::bytea OR h.owner_pubkey=(\
+                    SELECT u.agent_owner_pubkey FROM users u \
+                     WHERE u.community_id=$1 AND u.pubkey=$2\
+                ))\
+         )",
+    )
+    .bind(community.as_uuid())
+    .bind(agent)
+    .bind(proven_owner)
+    .fetch_one(pool)
+    .await
+    .map_err(Into::into)
+}
+
 /// Whether a projection coordinate is controlled by a PMA head.
 pub async fn projection_coordinate_is_authoritative(
     pool: &PgPool,
@@ -882,6 +913,84 @@ mod tests {
         .await
         .unwrap();
         assert!(!instance_live);
+        assert!(
+            participation_is_revoked(
+                &pool,
+                community,
+                first_agent.public_key().as_bytes(),
+                Some(owner.public_key().as_bytes()),
+            )
+            .await
+            .unwrap(),
+            "the exact deleted owner-agent coordinate revokes participation"
+        );
+        let foreign_owner = Keys::generate();
+        assert!(
+            !participation_is_revoked(
+                &pool,
+                community,
+                first_agent.public_key().as_bytes(),
+                Some(foreign_owner.public_key().as_bytes()),
+            )
+            .await
+            .unwrap(),
+            "a foreign owner cannot use another owner's tombstone to revoke an agent"
+        );
+        let db = crate::Db::from_pool(pool.clone());
+        db.ensure_user(community, owner.public_key().as_bytes())
+            .await
+            .unwrap();
+        db.ensure_user(community, first_agent.public_key().as_bytes())
+            .await
+            .unwrap();
+        assert!(db
+            .set_agent_owner(
+                community,
+                first_agent.public_key().as_bytes(),
+                owner.public_key().as_bytes(),
+            )
+            .await
+            .unwrap());
+        assert!(
+            participation_is_revoked(&pool, community, first_agent.public_key().as_bytes(), None,)
+                .await
+                .unwrap(),
+            "the durable owner mapping revokes without request delegation evidence"
+        );
+        assert!(
+            !participation_is_revoked(
+                &pool,
+                community,
+                second_agent.public_key().as_bytes(),
+                Some(owner.public_key().as_bytes()),
+            )
+            .await
+            .unwrap(),
+            "an active head does not revoke participation"
+        );
+        let other_community = postgres_fixture().await.unwrap().1;
+        assert!(
+            !participation_is_revoked(
+                &pool,
+                other_community,
+                first_agent.public_key().as_bytes(),
+                Some(owner.public_key().as_bytes()),
+            )
+            .await
+            .unwrap(),
+            "a tombstone in another community does not revoke participation"
+        );
+        assert!(
+            !participation_is_revoked(
+                &pool,
+                community,
+                Keys::generate().public_key().as_bytes(),
+                Some(owner.public_key().as_bytes()),
+            )
+            .await
+            .unwrap(),
+            "an absent head does not revoke participation"
+        );
         assert!(
             projection_is_authoritative(
                 &pool,

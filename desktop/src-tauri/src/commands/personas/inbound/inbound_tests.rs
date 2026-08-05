@@ -300,7 +300,8 @@ fn private_aggregate_reconstructs_portable_agent_and_authority() {
     .unwrap();
 
     let reconstructed =
-        reconstruct_managed_agent_from_payload(&candidate.payload, &candidate.signed_event).unwrap();
+        reconstruct_managed_agent_from_payload(&candidate.payload, &candidate.signed_event)
+            .unwrap();
     assert_eq!(reconstructed.pubkey, source.pubkey);
     assert_eq!(reconstructed.private_key_nsec, source.private_key_nsec);
     assert_eq!(reconstructed.backend, source.backend);
@@ -308,7 +309,10 @@ fn private_aggregate_reconstructs_portable_agent_and_authority() {
     assert_eq!(reconstructed.relay_mesh, source.relay_mesh);
     let evidence = reconstructed.relay_authority.evidence().unwrap();
     assert_eq!(evidence.generation, 1);
-    assert_eq!(evidence.private_event_id, candidate.signed_event.id.to_hex());
+    assert_eq!(
+        evidence.private_event_id,
+        candidate.signed_event.id.to_hex()
+    );
 }
 
 #[test]

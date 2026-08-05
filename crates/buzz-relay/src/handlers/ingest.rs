@@ -65,6 +65,8 @@ pub enum IngestAuth {
     Nip42 {
         /// The authenticated Nostr public key.
         pubkey: nostr::PublicKey,
+        /// Cryptographically proven and materialized NIP-OA owner, if any.
+        agent_owner_pubkey: Option<nostr::PublicKey>,
         /// Permission scopes granted to this connection.
         scopes: Vec<Scope>,
         /// Token-level channel restriction, if the WebSocket auth used an API token.
@@ -76,6 +78,8 @@ pub enum IngestAuth {
     Http {
         /// The authenticated Nostr public key.
         pubkey: nostr::PublicKey,
+        /// Cryptographically proven and materialized NIP-OA owner, if any.
+        agent_owner_pubkey: Option<nostr::PublicKey>,
         /// Permission scopes granted to this request.
         scopes: Vec<Scope>,
         /// How the HTTP request was authenticated.
@@ -94,6 +98,18 @@ impl IngestAuth {
     /// Pubkey used for principal-scoped accounting and policy lookups.
     pub fn principal_pubkey_bytes(&self) -> Vec<u8> {
         self.pubkey().to_bytes().to_vec()
+    }
+
+    /// Cryptographically proven and materialized NIP-OA owner, if any.
+    pub fn agent_owner_pubkey(&self) -> Option<&nostr::PublicKey> {
+        match self {
+            Self::Nip42 {
+                agent_owner_pubkey, ..
+            }
+            | Self::Http {
+                agent_owner_pubkey, ..
+            } => agent_owner_pubkey.as_ref(),
+        }
     }
 
     /// Permission scopes for this auth context.
@@ -1908,6 +1924,32 @@ async fn ingest_event_inner(
         )));
     }
 
+    // Participation revocation is durable authority, not a pub/sub side effect.
+    // Recheck every write so a socket that missed the tombstone disconnect
+    // cannot continue mutating relay state.
+    match state
+        .db
+        .managed_agent_participation_is_revoked(
+            tenant.community(),
+            auth.pubkey().as_bytes(),
+            auth.agent_owner_pubkey()
+                .map(|owner| owner.as_bytes().as_slice()),
+        )
+        .await
+    {
+        Ok(true) => {
+            return Err(IngestError::AuthFailed(
+                "blocked: managed agent has been deleted".to_string(),
+            ));
+        }
+        Ok(false) => {}
+        Err(e) => {
+            return Err(IngestError::Internal(format!(
+                "error: internal error checking managed-agent participation: {e}"
+            )));
+        }
+    }
+
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {
@@ -3010,6 +3052,7 @@ mod tests {
         .expect("sign feedback");
         let auth = IngestAuth::Http {
             pubkey: keys.public_key(),
+            agent_owner_pubkey: None,
             scopes: vec![Scope::MessagesWrite],
             auth_method: HttpAuthMethod::Nip98,
         };
@@ -3424,6 +3467,7 @@ mod tests {
         let envelope_signer = nostr::Keys::generate();
         let auth = IngestAuth::Nip42 {
             pubkey: principal.public_key(),
+            agent_owner_pubkey: None,
             scopes: vec![],
             channel_ids: None,
             conn_id: Uuid::new_v4(),
@@ -3442,6 +3486,7 @@ mod tests {
         let keys = nostr::Keys::generate();
         let http_auth = IngestAuth::Http {
             pubkey: keys.public_key(),
+            agent_owner_pubkey: None,
             scopes: vec![],
             auth_method: HttpAuthMethod::Nip98,
         };
@@ -3457,6 +3502,7 @@ mod tests {
         let keys = nostr::Keys::generate();
         let ws_auth = IngestAuth::Nip42 {
             pubkey: keys.public_key(),
+            agent_owner_pubkey: None,
             scopes: vec![],
             channel_ids: None,
             conn_id: uuid::Uuid::new_v4(),

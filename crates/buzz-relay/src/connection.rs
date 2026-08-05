@@ -601,13 +601,49 @@ async fn enforce_ws_admission(
         return true;
     }
 
-    let (pubkey, is_agent) = {
+    let (pubkey, owner) = {
         let auth = conn.auth_state.read().await;
         match &*auth {
-            AuthState::Authenticated(ctx) => (ctx.pubkey, ctx.agent_owner_pubkey.is_some()),
+            AuthState::Authenticated(ctx) => (ctx.pubkey, ctx.agent_owner_pubkey),
             _ => return true,
         }
     };
+    let is_agent = owner.is_some();
+
+    match state
+        .db
+        .managed_agent_participation_is_revoked(
+            conn.tenant.community(),
+            pubkey.as_bytes(),
+            owner.as_ref().map(|owner| owner.as_bytes().as_slice()),
+        )
+        .await
+    {
+        Ok(false) => {}
+        Ok(true) => {
+            conn.send(request_rejection_message(
+                match msg {
+                    ClientMessage::Req { sub_id, .. } => Some(sub_id.as_str()),
+                    _ => None,
+                },
+                "blocked: managed agent has been deleted",
+            ));
+            conn.cancel.cancel();
+            return false;
+        }
+        Err(error) => {
+            warn!(conn_id = %conn.conn_id, %error, "managed-agent participation revalidation failed closed");
+            conn.send(request_rejection_message(
+                match msg {
+                    ClientMessage::Req { sub_id, .. } => Some(sub_id.as_str()),
+                    _ => None,
+                },
+                "error: managed-agent participation unavailable",
+            ));
+            conn.cancel.cancel();
+            return false;
+        }
+    }
 
     let limits = &state.auth.config().rate_limits;
     let (ws_window_secs, ws_limit) =
