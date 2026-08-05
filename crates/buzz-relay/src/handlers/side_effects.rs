@@ -2168,19 +2168,20 @@ async fn handle_a_tag_deletion(
             // PMA-bound projections may only be retired by advancing the
             // private aggregate generation. A legacy kind:5 is retained as an
             // offline compatibility signal but cannot mutate canonical state.
-            if matches!(
-                k,
-                buzz_core::kind::KIND_PERSONA | buzz_core::kind::KIND_MANAGED_AGENT
-            ) && state
-                .db
-                .managed_agent_projection_coordinate_is_authoritative(
-                    tenant.community(),
+            if k == buzz_core::kind::KIND_PRIVATE_MANAGED_AGENT
+                || (matches!(
                     k,
-                    &pubkey_bytes,
-                    d_tag,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("PMA deletion fence failed: {e}"))?
+                    buzz_core::kind::KIND_PERSONA | buzz_core::kind::KIND_MANAGED_AGENT
+                ) && state
+                    .db
+                    .managed_agent_projection_coordinate_is_authoritative(
+                        tenant.community(),
+                        k,
+                        &pubkey_bytes,
+                        d_tag,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("PMA deletion fence failed: {e}"))?)
             {
                 tracing::debug!(
                     kind = k,

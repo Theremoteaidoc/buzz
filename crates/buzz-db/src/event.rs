@@ -887,6 +887,10 @@ pub async fn soft_delete_by_coordinate(
         .bind(lock_key)
         .execute(&mut *tx)
         .await?;
+    if kind as u32 == buzz_core::kind::KIND_PRIVATE_MANAGED_AGENT {
+        tx.rollback().await?;
+        return Ok(false);
+    }
     if matches!(
         kind as u32,
         buzz_core::kind::KIND_PERSONA | buzz_core::kind::KIND_MANAGED_AGENT
@@ -940,6 +944,10 @@ pub async fn soft_delete_event_and_update_thread(
             .fetch_optional(&mut *tx)
             .await?;
     if let Some((kind, pubkey, Some(d_tag))) = coordinate {
+        if kind as u32 == buzz_core::kind::KIND_PRIVATE_MANAGED_AGENT {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         if matches!(
             kind as u32,
             buzz_core::kind::KIND_PERSONA | buzz_core::kind::KIND_MANAGED_AGENT

@@ -795,6 +795,7 @@ mod tests {
 
         // Both legacy kind:5 mutation shapes are fenced at the DB boundary:
         // a-tags delete by coordinate, while e-tags delete the resolved event ID.
+        let first_agent_d = first_agent.public_key().to_hex();
         for (kind, d_tag, event_id) in [
             (
                 30175,
@@ -805,6 +806,11 @@ mod tests {
                 30177,
                 ingest_race_d.as_str(),
                 expected_ingest_race_instance_id.as_slice(),
+            ),
+            (
+                buzz_core::kind::KIND_PRIVATE_MANAGED_AGENT as i32,
+                first_agent_d.as_str(),
+                first_v2.private_event.id.as_bytes(),
             ),
         ] {
             assert!(
