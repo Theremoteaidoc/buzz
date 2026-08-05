@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -132,6 +132,10 @@ test("fileOverrides raises the ceiling for a named path without leaking to other
   gitRepo("commit", "--allow-empty", "-m", "base");
   gitRepo("remote", "add", "origin", repoRoot);
   gitRepo("fetch", "origin", "main:refs/remotes/origin/main");
+
+  // Add a second commit so HEAD^1 resolves (the CI path uses HEAD^1 as base,
+  // and a parentless HEAD causes git cat-file -e HEAD^1^{commit} to throw).
+  gitRepo("commit", "--allow-empty", "-m", "branch commit");
 
   // Write both files: 1001 lines each (1 over the 1000-line default ceiling)
   const content = "x\n".repeat(1001);
