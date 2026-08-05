@@ -29,7 +29,7 @@ const MIGRATION_0008_SQL: &str =
     include_str!("../../../migrations/0008_fresh_install_search_allowlist.sql");
 const MIGRATION_0014_SQL: &str = include_str!("../../../migrations/0014_push_lease_fts.sql");
 const MIGRATION_0028_SQL: &str =
-    include_str!("../../../migrations/0028_private_managed_agent_authority.sql");
+    include_str!("../../../migrations/0028_private_managed_agent_foundation.sql");
 
 async fn setup() -> (PgPool, String) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
