@@ -106,6 +106,7 @@ export default defineConfig({
         "**/send-channel-binding.spec.ts",
         "**/project-commit-detail.spec.ts",
         "**/project-inbox.spec.ts",
+        "**/project-issue-comments.spec.ts",
         "**/project-pr-review.spec.ts",
         "**/persona-model-combobox-screenshots.spec.ts",
         "**/drafts-screenshots.spec.ts",
@@ -139,6 +140,7 @@ export default defineConfig({
         "**/where-to-run-config.spec.ts",
         "**/huddle-transcription.spec.ts",
         "**/agent-numeric-tuning.spec.ts",
+        "**/needs-restart-screenshots.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

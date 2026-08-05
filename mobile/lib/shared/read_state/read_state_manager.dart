@@ -6,8 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../../../shared/crypto/nip44.dart';
-import '../../../shared/relay/relay.dart';
+import '../crypto/nip44.dart';
+import '../relay/relay.dart';
 import 'read_state_format.dart';
 import 'read_state_storage.dart';
 import 'read_state_time.dart';
@@ -423,6 +423,16 @@ class ReadStateManager {
       _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, createdAt);
       _persistLocalState();
     } catch (error) {
+      if (_isOversizedReadStateError(error)) {
+        _remoteUnsupported = true;
+        _debounceTimer?.cancel();
+        _debounceTimer = null;
+        debugPrint(
+          '[ReadStateManager] remote read-state sync disabled because the '
+          'local state exceeds the NIP-44 plaintext limit.',
+        );
+        return;
+      }
       if (_isPermanentReadStateRemoteError(error)) {
         _remoteUnsupported = true;
         _debounceTimer?.cancel();
@@ -525,6 +535,12 @@ class ReadStateManager {
 
   bool _isPlausibleCreatedAt(int createdAt) =>
       createdAt <= currentUnixSeconds() + readStateMaxClockDriftSeconds;
+
+  bool _isOversizedReadStateError(Object error) {
+    final msg = error.toString().toLowerCase();
+    return error is ArgumentError &&
+        msg.contains('plaintext must be 1-65535 bytes');
+  }
 
   bool _isPermanentReadStateRemoteError(Object error) {
     // Relay rejections come back as `Exception("<message>")` from the
