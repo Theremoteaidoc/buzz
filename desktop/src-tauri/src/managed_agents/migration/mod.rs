@@ -707,5 +707,10 @@ fn require_owner_projection(
     }
 }
 
+/// The transport half of this seam: submits retained aggregates over HTTP and
+/// verifies the read-back through [`verify_promotion`]. Kept in a sibling
+/// module so the pure builder/verifier above stays free of HTTP/persistence.
+pub(crate) mod driver;
+
 #[cfg(test)]
 mod tests;
