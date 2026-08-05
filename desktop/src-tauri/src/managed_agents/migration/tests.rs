@@ -161,10 +161,15 @@ impl Fixture {
     /// serves back exactly what we submitted.
     fn faithful_response(&self, candidate: &MigrationCandidate) -> AggregateResponse {
         AggregateResponse {
+            event_id: candidate.signed_event.id.to_hex(),
+            generation: self.cas.generation,
+            state: "active".to_string(),
+            accepted: true,
+            inserted: true,
             private_event: candidate.signed_event.clone(),
-            definition_event: candidate.definition_event.clone(),
-            instance_event: candidate.instance_event.clone(),
-            definition_revision: self.cas.definition_revision,
+            definition_event: Some(candidate.definition_event.clone()),
+            instance_event: Some(candidate.instance_event.clone()),
+            definition_revision: Some(self.cas.definition_revision),
         }
     }
 }
@@ -182,6 +187,53 @@ fn happy_round_trip_yields_promotion_evidence() {
     assert_eq!(evidence.generation, 1);
     assert_eq!(evidence.previous_event_id, None);
     assert_eq!(evidence.definition_revision, 7);
+}
+
+#[test]
+fn route_response_shape_deserializes_and_missing_projection_is_rejected() {
+    let fx = Fixture::new();
+    let candidate = fx.build().expect("candidate builds");
+    let response_json = serde_json::json!({
+        "event_id": candidate.signed_event.id.to_hex(),
+        "generation": 1,
+        "state": "active",
+        "accepted": true,
+        "inserted": true,
+        "definition_revision": 7,
+        "private_event": candidate.signed_event,
+        "definition_event": candidate.definition_event,
+        "instance_event": candidate.instance_event,
+    });
+    let response: AggregateResponse =
+        serde_json::from_value(response_json).expect("route JSON deserializes");
+    verify_promotion(&candidate, &response, &fx.owner_keys).expect("route response verifies");
+
+    let mut missing = response;
+    missing.instance_event = None;
+    assert!(matches!(
+        verify_promotion(&candidate, &missing, &fx.owner_keys),
+        Err(MigrationError::VerificationFailed(_))
+    ));
+}
+
+#[test]
+fn verify_rejects_response_metadata_drift() {
+    let fx = Fixture::new();
+    let candidate = fx.build().expect("candidate builds");
+    for mutate in 0..4 {
+        let mut response = fx.faithful_response(&candidate);
+        match mutate {
+            0 => response.event_id = "0".repeat(64),
+            1 => response.generation += 1,
+            2 => response.state = "deleted".to_string(),
+            3 => response.accepted = false,
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            verify_promotion(&candidate, &response, &fx.owner_keys),
+            Err(MigrationError::VerificationFailed(_))
+        ));
+    }
 }
 
 #[test]
@@ -360,12 +412,12 @@ fn verify_rejects_swapped_definition_projection() {
     let candidate = fx.build().expect("candidate builds");
     let mut response = fx.faithful_response(&candidate);
     // Relay serves a different (validly owner-signed) definition than bound.
-    response.definition_event = signed_projection(
+    response.definition_event = Some(signed_projection(
         &fx.owner_keys,
         KIND_PERSONA,
         "def-slug",
         "{\"definition\":\"SWAPPED\"}",
-    );
+    ));
     let err = verify_promotion(&candidate, &response, &fx.owner_keys).unwrap_err();
     assert!(matches!(err, MigrationError::VerificationFailed(_)));
 }
@@ -375,12 +427,12 @@ fn verify_rejects_swapped_instance_projection() {
     let fx = Fixture::new();
     let candidate = fx.build().expect("candidate builds");
     let mut response = fx.faithful_response(&candidate);
-    response.instance_event = signed_projection(
+    response.instance_event = Some(signed_projection(
         &fx.owner_keys,
         KIND_MANAGED_AGENT,
         &fx.agent_keys.public_key().to_hex(),
         "{\"instance\":\"SWAPPED\"}",
-    );
+    ));
     let err = verify_promotion(&candidate, &response, &fx.owner_keys).unwrap_err();
     assert!(matches!(err, MigrationError::VerificationFailed(_)));
 }
@@ -390,7 +442,7 @@ fn verify_rejects_wrong_definition_revision() {
     let fx = Fixture::new();
     let candidate = fx.build().expect("candidate builds");
     let mut response = fx.faithful_response(&candidate);
-    response.definition_revision = fx.cas.definition_revision + 1;
+    response.definition_revision = Some(fx.cas.definition_revision + 1);
     let err = verify_promotion(&candidate, &response, &fx.owner_keys).unwrap_err();
     assert!(matches!(err, MigrationError::VerificationFailed(_)));
 }
@@ -419,6 +471,8 @@ fn verify_rejects_stale_generation_head() {
     .expect("gen-2 candidate builds");
     let mut response = fx.faithful_response(&candidate);
     response.private_event = candidate2.signed_event.clone();
+    response.event_id = candidate2.signed_event.id.to_hex();
+    response.generation = cas2.generation;
     let err = verify_promotion(&candidate, &response, &fx.owner_keys).unwrap_err();
     assert!(matches!(err, MigrationError::VerificationFailed(_)));
 }

@@ -33,6 +33,7 @@ use buzz_core_pkg::private_managed_agent::{
     PrivateIdentity, ProjectionRecoveryV1, State,
 };
 use nostr::{Event, Keys, PublicKey, ToBech32};
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::authority::VersionedBackend;
@@ -109,17 +110,28 @@ pub struct MigrationCandidate {
 /// JSON, not a buzz-db type: the transport lane deserializes the route response
 /// into this shape and hands it here for verification. Keeping it local keeps
 /// this slice free of the relay/persistence crates.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct AggregateResponse {
+    /// Exact ID of the committed private head.
+    pub event_id: String,
+    /// Committed CAS generation.
+    pub generation: u64,
+    /// Committed lifecycle state.
+    pub state: String,
+    /// Whether the relay accepted the request.
+    pub accepted: bool,
+    /// Whether this request inserted a new generation rather than replaying one.
+    pub inserted: bool,
     /// The signed kind:30179 event the relay stored and serves as the head.
     pub private_event: Event,
     /// The signed kind:30175 definition projection the relay serves.
-    pub definition_event: Event,
+    pub definition_event: Option<Event>,
     /// The signed kind:30177 instance projection the relay serves.
-    pub instance_event: Event,
+    pub instance_event: Option<Event>,
     /// The definition revision the relay reports for the served projection.
-    pub definition_revision: u64,
+    pub definition_revision: Option<u64>,
 }
 
 /// Proof that a submitted migration was stored and served back byte-exactly.
@@ -306,6 +318,45 @@ pub fn verify_promotion(
         .map_err(|e| MigrationError::VerificationFailed(format!("head decrypt/validate: {e}")))?;
 
     let source = &candidate.payload;
+    if !response.accepted {
+        return Err(MigrationError::VerificationFailed(
+            "relay did not accept aggregate".into(),
+        ));
+    }
+    verify_eq(
+        "response.event_id",
+        &response.event_id,
+        &response.private_event.id.to_hex(),
+    )?;
+    verify_eq(
+        "response.generation",
+        &response.generation,
+        &source.generation,
+    )?;
+    verify_eq("response.state", &response.state.as_str(), &"active")?;
+
+    let definition_event = response.definition_event.as_ref().ok_or_else(|| {
+        MigrationError::VerificationFailed("read-back missing definition projection".into())
+    })?;
+    let instance_event = response.instance_event.as_ref().ok_or_else(|| {
+        MigrationError::VerificationFailed("read-back missing instance projection".into())
+    })?;
+
+    if !response.private_event.verify_id() || !response.private_event.verify_signature() {
+        return Err(MigrationError::VerificationFailed(
+            "read-back head has invalid id or signature".into(),
+        ));
+    }
+    if !definition_event.verify_id() || !definition_event.verify_signature() {
+        return Err(MigrationError::VerificationFailed(
+            "read-back definition has invalid id or signature".into(),
+        ));
+    }
+    if !instance_event.verify_id() || !instance_event.verify_signature() {
+        return Err(MigrationError::VerificationFailed(
+            "read-back instance has invalid id or signature".into(),
+        ));
+    }
 
     // 2. CAS + identity metadata must echo the candidate exactly.
     verify_eq(
@@ -348,14 +399,14 @@ pub fn verify_promotion(
     // 3. The returned signed projections must be the exact events the bindings
     //    name — compare id + content hash + full recovery event, and check the
     //    returned projection events match the returned response events too.
-    verify_binding_definition(source_active, roundtrip_active, response)?;
-    verify_binding_instance(source_active, roundtrip_active, response)?;
+    verify_binding_definition(source_active, roundtrip_active, definition_event)?;
+    verify_binding_instance(source_active, roundtrip_active, instance_event)?;
 
     // 4. Definition revision the relay reports must match what we pinned.
     verify_eq(
         "definition_revision",
         &response.definition_revision,
-        &source_active.definition.revision,
+        &Some(source_active.definition.revision),
     )?;
 
     // 5. Carried-class equality: the private config we sealed must round-trip
@@ -386,7 +437,7 @@ pub fn verify_promotion(
 fn verify_binding_definition(
     source: &ActivePayload,
     roundtrip: &ActivePayload,
-    response: &AggregateResponse,
+    definition_event: &Event,
 ) -> Result<(), MigrationError> {
     verify_eq(
         "definition.event_id",
@@ -406,8 +457,9 @@ fn verify_binding_definition(
     // The response's standalone definition event must be the same one the
     // binding names, so a relay cannot serve a matching binding beside a
     // swapped public projection.
-    if response.definition_event.id.to_hex() != source.definition.event_id
-        || pma::content_sha256(response.definition_event.content.as_bytes())
+    if definition_event != &source.definition.recovery.signed_event
+        || definition_event.id.to_hex() != source.definition.event_id
+        || pma::content_sha256(definition_event.content.as_bytes())
             != source.definition.content_sha256
     {
         return Err(MigrationError::VerificationFailed(
@@ -420,7 +472,7 @@ fn verify_binding_definition(
 fn verify_binding_instance(
     source: &ActivePayload,
     roundtrip: &ActivePayload,
-    response: &AggregateResponse,
+    instance_event: &Event,
 ) -> Result<(), MigrationError> {
     verify_eq(
         "instance.event_id",
@@ -437,8 +489,9 @@ fn verify_binding_instance(
             "instance recovery differs".into(),
         ));
     }
-    if response.instance_event.id.to_hex() != source.instance_projection.event_id
-        || pma::content_sha256(response.instance_event.content.as_bytes())
+    if instance_event != &source.instance_projection.recovery.signed_event
+        || instance_event.id.to_hex() != source.instance_projection.event_id
+        || pma::content_sha256(instance_event.content.as_bytes())
             != source.instance_projection.content_sha256
     {
         return Err(MigrationError::VerificationFailed(
