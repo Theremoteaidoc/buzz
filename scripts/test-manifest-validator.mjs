@@ -184,6 +184,19 @@ test("schema-negative: duplicate family rule id is rejected", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Rule: registry_label on a family rule is rejected (display rule (a))
+// ---------------------------------------------------------------------------
+test("schema-negative: registry_label on a family rule is rejected", () => {
+  assertRejects(
+    "family rule registry_label forbidden",
+    mutate((m) => {
+      m.family_rules[0].registry_label = "Family Masquerade";
+    }),
+    "registry_label is not allowed on family rules",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Rule: duplicate exact_record (provider, raw_model_id) key
 // ---------------------------------------------------------------------------
 test("schema-negative: duplicate exact_record key is rejected", () => {

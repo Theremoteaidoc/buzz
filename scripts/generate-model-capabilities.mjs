@@ -344,6 +344,12 @@ for (const rule of manifest.family_rules) {
     VALID_NORM_POLICIES,
     `rule ${rule.id} normalization_policy`,
   );
+  if (Object.prototype.hasOwnProperty.call(rule, "registry_label")) {
+    throw new Error(
+      `rule ${rule.id}: registry_label is not allowed on family rules; ` +
+        `registry_label is exact-record-only (display rule (a))`,
+    );
+  }
 }
 
 // Validate provider_fallbacks
@@ -612,7 +618,7 @@ function resolve(provider, rawModelId) {
       _provenance: {
         source: "exact",
         exact_key: `${provider}::${rawModelId}`,
-        registry_label: labelFromExact ? "exact_record" : (familyProv ? `family:${familyProv.rule_id}@${familyProv.rule_priority}` : "absent"),
+        registry_label: labelFromExact ? "exact_record" : "absent",
         supported_efforts: effortsFromExact ? "exact_record" : (familyProv ? `family:${familyProv.rule_id}@${familyProv.rule_priority}` : "fallback"),
         databricks_v2_wire_route: routeFromExact ? "exact_record" : (familyProv ? `family:${familyProv.rule_id}@${familyProv.rule_priority}` : "fallback"),
         thinking_mode: modeFromExact ? "exact_record" : (familyProv ? `family:${familyProv.rule_id}@${familyProv.rule_priority}` : "fallback"),
@@ -625,7 +631,7 @@ function resolve(provider, rawModelId) {
   // Step 2: provider-scoped family rules on normalized alias
   const normalizedAlias = stripCatalogPrefix(rawModelId ?? "");
   const familyResult = resolveFamilyRules(provider, normalizedAlias, rawModelId);
-  if (familyResult) return familyResult;
+  if (familyResult) return { ...familyResult, registry_label: null };
 
   // Step 3: provider fallback
   const fallback = getProviderFallback(provider, isBlank);
@@ -645,7 +651,6 @@ function resolveFamilyRules(provider, normalizedAlias, rawModelId) {
         ? rule.databricks_v2_wire_route
         : "not-applicable";
       return {
-        registry_label: rule.registry_label ?? null,
         thinking_mode: rule.thinking_mode,
         supported_efforts: rule.supported_efforts,
         default_effort: rule.default_effort,
@@ -1083,7 +1088,7 @@ function emitRustFamilyResolverFn() {
       arms.push(
         `    // rule: ${rule.id}, provider: ${provider}, priority: ${rule.match_priority}\n    if provider == "${provider}" && (${matchExpr}) {\n        return Some(\n${emitRustCapabilityResult(
           {
-            registry_label: rule.registry_label ?? null,
+            registry_label: null,
             thinking_mode: rule.thinking_mode,
             supported_efforts: rule.supported_efforts,
             default_effort: rule.default_effort,
@@ -1323,7 +1328,7 @@ function emitTsFamilyResolver() {
         ? rule.databricks_v2_wire_route
         : "not-applicable";
       const clean = {
-        registry_label: rule.registry_label ?? null,
+        registry_label: null,
         thinking_mode: rule.thinking_mode,
         supported_efforts: rule.supported_efforts,
         default_effort: rule.default_effort,
