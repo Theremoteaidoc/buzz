@@ -561,7 +561,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 27);
+        assert_eq!(migrations.len(), 28);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -940,6 +940,16 @@ mod tests {
             desired_schema.contains("idx_channels_id_live"),
             "desired-state schema must carry the channel-id lookup index",
         );
+
+        // Private managed-agent ciphertext is author-only and must remain
+        // unsearchable on brownfield databases without changing 0001's sqlx
+        // checksum. The additive wrapper preserves the existing expression.
+        assert_eq!(migrations[27].version, 28);
+        let private_managed_agent = migrations[27].sql.as_str();
+        assert!(private_managed_agent.contains("kind = 30179"));
+        assert!(private_managed_agent.contains("pg_get_expr"));
+        assert!(private_managed_agent.contains("search_tsv"));
+        assert!(!migrations[0].sql.as_str().contains("30179"));
     }
 
     #[test]

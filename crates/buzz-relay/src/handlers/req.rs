@@ -289,6 +289,12 @@ pub async fn handle_req(
             let mut params =
                 filter_to_query_params(filter, per_filter_channel, conn.tenant.community());
             apply_access_scope_to_query(&mut params, per_filter_channel, &accessible_channels);
+            // Private visibility pushdown must happen before ORDER/LIMIT. This
+            // applies even to mixed-kind and kindless filters; per-event checks
+            // remain defense-in-depth for id lookups and future call paths.
+            if filter_can_match_author_only_kinds(filter) {
+                params.author_only_reader = Some(pubkey_bytes.clone());
+            }
             // Shared-gated visibility pushdown: set reader bytes so query_events
             // appends the SQL visibility clause before ORDER/LIMIT, preventing
             // newer private events from starving older shared ones off the page.
@@ -752,12 +758,16 @@ async fn handle_search_req(
 /// Resolves accessible channels for the given pubkey and builds the query.
 pub async fn build_event_query_from_filter(
     filter: &Filter,
-    _pubkey_bytes: &[u8],
+    pubkey_bytes: &[u8],
     _state: &AppState,
     community: buzz_core::tenant::CommunityId,
 ) -> EventQuery {
     let channel_id = extract_channel_id_from_filter(filter);
-    filter_to_query_params(filter, channel_id, community)
+    let mut query = filter_to_query_params(filter, channel_id, community);
+    if filter_can_match_author_only_kinds(filter) {
+        query.author_only_reader = Some(pubkey_bytes.to_vec());
+    }
+    query
 }
 
 /// Maximum SQL candidate rows a non-pushable COUNT filter may inspect before

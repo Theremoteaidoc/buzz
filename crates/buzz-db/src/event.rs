@@ -10,8 +10,8 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 
 use buzz_core::kind::{
-    event_kind_i32, is_ephemeral, is_parameterized_replaceable, KIND_AUTH, KIND_EVENT_REMINDER,
-    KIND_HUDDLE_STARTED, SHARED_GATED_KINDS,
+    event_kind_i32, is_ephemeral, is_parameterized_replaceable, AUTHOR_ONLY_KINDS, KIND_AUTH,
+    KIND_EVENT_REMINDER, KIND_HUDDLE_STARTED, SHARED_GATED_KINDS,
 };
 use buzz_core::{CommunityId, StoredEvent};
 
@@ -78,6 +78,11 @@ pub struct EventQuery {
     /// the COUNT fallback path, which needs to fetch all matching events for
     /// post-filter counting. When None, the default clamp applies.
     pub max_limit: Option<i64>,
+    /// Author-only visibility reader: when set, append an SQL visibility clause
+    /// for every kind in [`buzz_core::kind::AUTHOR_ONLY_KINDS`] before
+    /// ORDER/LIMIT. This prevents newer foreign private rows from starving the
+    /// authenticated owner's visible rows off a bounded page.
+    pub author_only_reader: Option<Vec<u8>>,
     /// Shared-gated visibility reader: when set, append an SQL visibility
     /// clause for every kind in [`SHARED_GATED_KINDS`] before ORDER/LIMIT so
     /// private events are excluded from the candidate page rather than
@@ -123,6 +128,7 @@ impl EventQuery {
             e_tags: None,
             channel_ids: None,
             max_limit: None,
+            author_only_reader: None,
             shared_gated_reader: None,
         }
     }
@@ -521,6 +527,21 @@ pub(crate) async fn query_events_on(
         }
     }
 
+    // Author-only visibility pushdown: exclude private rows not authored by
+    // the authenticated reader before ORDER/LIMIT. Post-filtering alone is not
+    // sufficient: a foreign owner can otherwise fill the candidate page and
+    // starve the reader's older rows.
+    if let Some(ref reader_bytes) = q.author_only_reader {
+        qb.push(format!(" AND ({col_prefix}kind NOT IN ("));
+        let mut sep = qb.separated(", ");
+        for kind in AUTHOR_ONLY_KINDS {
+            sep.push_bind(*kind as i32);
+        }
+        qb.push(format!(") OR {col_prefix}pubkey = "));
+        qb.push_bind(reader_bytes.clone());
+        qb.push(")");
+    }
+
     // Shared-gated visibility pushdown: exclude SHARED_GATED_KINDS events that
     // are neither authored by the reader nor explicitly shared.  Applied BEFORE
     // ORDER/LIMIT so that a page of newer private events does not push visible
@@ -759,6 +780,38 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
             }
             qb.push(")");
         }
+    }
+
+    // Apply the same author-only SQL visibility gate used by query_events.
+    // COUNT must not leak foreign event existence, including for mixed-kind
+    // filters and kindless id lookups.
+    if let Some(ref reader_bytes) = q.author_only_reader {
+        qb.push(format!(" AND ({col_prefix}kind NOT IN ("));
+        let mut sep = qb.separated(", ");
+        for kind in AUTHOR_ONLY_KINDS {
+            sep.push_bind(*kind as i32);
+        }
+        qb.push(format!(") OR {col_prefix}pubkey = "));
+        qb.push_bind(reader_bytes.clone());
+        qb.push(")");
+    }
+
+    // Shared-gated visibility belongs in SQL for COUNT as well. Although relay
+    // callers currently use the per-event fallback for these kinds, keeping the
+    // query primitive complete prevents a future direct caller from leaking
+    // foreign unshared rows.
+    if let Some(ref reader_bytes) = q.shared_gated_reader {
+        let shared_containment = serde_json::json!([["shared", "true"]]);
+        qb.push(format!(" AND ({col_prefix}kind NOT IN ("));
+        let mut sep = qb.separated(", ");
+        for kind in SHARED_GATED_KINDS {
+            sep.push_bind(*kind as i32);
+        }
+        qb.push(format!(") OR {col_prefix}pubkey = "));
+        qb.push_bind(reader_bytes.clone());
+        qb.push(format!(" OR {col_prefix}tags @> "));
+        qb.push_bind(shared_containment);
+        qb.push(")");
     }
 
     let row = qb.build().fetch_one(&mut *conn).await?;
