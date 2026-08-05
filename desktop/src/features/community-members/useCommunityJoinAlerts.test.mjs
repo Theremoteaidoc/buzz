@@ -471,6 +471,22 @@ async function settleAfterRefreshDebounce() {
   await settle();
 }
 
+/**
+ * Advance past the cross-snapshot notify window, then settle.
+ *
+ * Alerts are queued per snapshot and delivered on a trailing quiet window, so
+ * a burst spanning several intermediate 13534s produces one notification
+ * instead of one per snapshot. Anything asserting that a notification WAS
+ * delivered has to outwait that window; anything asserting an absence should
+ * outwait it too, or it proves only that delivery is deferred.
+ */
+async function settleAfterNotifyWindow() {
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 1_700));
+  });
+  await settle();
+}
+
 function ledgerKeys() {
   return [...storage.keys()].filter((key) =>
     key.startsWith("buzz-community-join-seen.v1"),
@@ -514,7 +530,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
     assert.equal(ledgerKeys().length, 1, "the seed must be persisted");
 
     relay.emitSnapshot(snapshot([VIEWER, ALICE, BOB], { id: "snap-2" }));
-    await settle();
+    await settleAfterNotifyWindow();
 
     assert.equal(notifications.length, 1, "a genuine join must alert once");
     assert.match(notifications[0].title, /Community A/);
@@ -605,7 +621,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
     relay.emitSnapshot(snapshot([VIEWER, ALICE]));
     await settle();
     relay.emitSnapshot(snapshot([VIEWER, ALICE, BOB], { id: "snap-2" }));
-    await settle();
+    await settleAfterNotifyWindow();
     assert.equal(notifications.length, 1, "precondition: one join alerted");
 
     const before = relay.counts().fetchFirstEventCalls;
@@ -616,6 +632,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
     );
     relay.emitReconnect();
     await settleAfterRefreshDebounce();
+    await settleAfterNotifyWindow();
 
     assert.ok(
       relay.counts().fetchFirstEventCalls > before,
@@ -636,6 +653,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
     );
     relay.emitReconnect();
     await settleAfterRefreshDebounce();
+    await settleAfterNotifyWindow();
 
     assert.equal(
       notifications.length,
@@ -707,6 +725,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
       sig: "s".repeat(128),
     });
     await settleAfterRefreshDebounce();
+    await settleAfterNotifyWindow();
 
     assert.equal(notifications.length, 1);
 
@@ -743,7 +762,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
     relay.emitSnapshot(snapshot([VIEWER, ALICE]));
     await settle();
     relay.emitSnapshot(snapshot([VIEWER, ALICE, BOB], { id: "snap-2" }));
-    await settle();
+    await settleAfterNotifyWindow();
     assert.equal(notifications.length, 1, "precondition: A alerted once");
     assert.deepEqual(ledgerKeys(), [joinAlertStorageKey(COMMUNITY_A, VIEWER)]);
 
@@ -808,7 +827,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
         createdAt: 5000,
       }),
     );
-    await settle();
+    await settleAfterNotifyWindow();
     assert.equal(notifications.length, 2);
 
     // Switching back must not re-alert A's roster: its ledger persisted.
@@ -817,7 +836,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
     relay.emitSnapshot(
       snapshot([VIEWER, ALICE, BOB], { id: "snap-a-return", createdAt: 6000 }),
     );
-    await settle();
+    await settleAfterNotifyWindow();
     assert.equal(
       notifications.length,
       2,
@@ -853,7 +872,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
     // Origin quota is exhausted and cache eviction cannot free enough.
     storageFull = true;
     relay.emitSnapshot(snapshot([VIEWER, ALICE, BOB], { id: "snap-full" }));
-    await settle();
+    await settleAfterNotifyWindow();
 
     assert.equal(
       notifications.length,
@@ -867,7 +886,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
     relay.emitSnapshot(
       snapshot([VIEWER, ALICE, BOB], { id: "snap-recovered", createdAt: 2000 }),
     );
-    await settle();
+    await settleAfterNotifyWindow();
 
     assert.equal(
       notifications.length,
@@ -879,7 +898,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
     relay.emitSnapshot(
       snapshot([VIEWER, ALICE, BOB], { id: "snap-after", createdAt: 3000 }),
     );
-    await settle();
+    await settleAfterNotifyWindow();
     assert.equal(notifications.length, 1);
 
     await unmount();
@@ -938,7 +957,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
     relay.emitSnapshot(
       snapshot([VIEWER, ALICE, BOB], { id: "snap-join", viewerRole: "admin" }),
     );
-    await settle();
+    await settleAfterNotifyWindow();
     assert.equal(notifications.length, 1, "precondition: admin still alerts");
 
     const ledgerBefore = storage.get(joinAlertStorageKey(COMMUNITY_A, VIEWER));
@@ -951,7 +970,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
         viewerRole: "member",
       }),
     );
-    await settle();
+    await settleAfterNotifyWindow();
 
     assert.equal(
       notifications.length,
@@ -994,7 +1013,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
       content: "",
       sig: "s".repeat(128),
     });
-    await settle();
+    await settleAfterNotifyWindow();
 
     assert.equal(
       notifications.length,
@@ -1027,7 +1046,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
     relay.emitSnapshot(
       snapshot([VIEWER, ALICE, ...bulk], { id: "snap-bulk", createdAt: 6000 }),
     );
-    await settle(10);
+    await settleAfterNotifyWindow();
 
     assert.equal(notifications.length, 1, "one summary, not one per member");
     assert.equal(notifications[0].body, "40 new members joined");
@@ -1055,7 +1074,7 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
         createdAt: 7000,
       }),
     );
-    await settle(10);
+    await settleAfterNotifyWindow();
 
     assert.equal(notifications.length, 2, "two joins, two named alerts");
     assert.ok(
@@ -1108,5 +1127,174 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
     );
 
     await unmount();
+  });
+
+  /**
+   * Max's live 50-join storm at `fdeda44f0`: 10 banners, not 1.
+   *
+   * The per-snapshot cap answers "one snapshot, many keys". The relay answers
+   * back "one burst, many snapshots" — it republishes the whole 13534 as each
+   * concurrent add commits, so a storm arrives as several growing rosters and
+   * each one independently emitted its own capped batch. The batch sizes below
+   * are Max's observed live values (6, 17, 4, 4, 4, 4, 11 = 50).
+   */
+  it("collapses a burst spanning several snapshots into one alert", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook();
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER]));
+    await settleAfterNotifyWindow();
+    assert.equal(notifications.length, 0, "precondition: seeded silently");
+
+    const roster = [VIEWER];
+    let minted = 0;
+    let snapIndex = 0;
+    for (const size of [6, 17, 4, 4, 4, 4, 11]) {
+      for (let i = 0; i < size; i++) {
+        minted += 1;
+        roster.push(minted.toString(16).padStart(2, "0").repeat(32));
+      }
+      snapIndex += 1;
+      relay.emitSnapshot(
+        snapshot([...roster], {
+          id: `storm-${snapIndex}`,
+          createdAt: 9000 + snapIndex,
+        }),
+      );
+      await settle();
+    }
+    await settleAfterNotifyWindow();
+
+    assert.equal(minted, 50, "fixture must mint Max's 50 joins");
+    assert.equal(
+      notifications.length,
+      1,
+      "a burst spanning 7 snapshots must produce one alert, not one per snapshot",
+    );
+    assert.equal(notifications[0].body, "50 new members joined");
+
+    await unmount();
+  });
+
+  /**
+   * Wren's arm 3, and the reason batching is not free: deferring delivery
+   * reopens his disclosure as a DELAYED one unless revocation also drops what
+   * is already queued. Measured failing before the clearPending() call existed
+   * — the queued batch flushed "5 new members joined" after the demotion.
+   */
+  it("drops queued alerts when a later snapshot demotes the viewer", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook({ role: "admin" });
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER], { viewerRole: "admin" }));
+    await settle();
+
+    // Joins land and are queued, but the flush window has not elapsed.
+    const roster = [VIEWER, ALICE, BOB, CAROL];
+    relay.emitSnapshot(
+      snapshot([...roster], {
+        id: "queued-joins",
+        createdAt: 10_000,
+        viewerRole: "admin",
+      }),
+    );
+    await settle();
+    assert.equal(
+      notifications.length,
+      0,
+      "precondition: delivery is still pending on the window",
+    );
+
+    // Demotion arrives before the timer fires.
+    relay.emitSnapshot(
+      snapshot([...roster], {
+        id: "queued-demote",
+        createdAt: 10_001,
+        viewerRole: "member",
+      }),
+    );
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      notifications.length,
+      0,
+      "a demotion before the flush must cancel the queued batch, not delay it",
+    );
+
+    await unmount();
+  });
+
+  /**
+   * Wren's arm 5. The window must batch a burst without swallowing legitimate
+   * later joins — otherwise the fix trades 10 spurious alerts for a silently
+   * dropped one.
+   */
+  it("still alerts separately for joins beyond the batching window", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook();
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER]));
+    await settleAfterNotifyWindow();
+
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE], { id: "join-1", createdAt: 11_000 }),
+    );
+    await settleAfterNotifyWindow();
+    assert.equal(notifications.length, 1, "first join alerts on its own");
+
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB], { id: "join-2", createdAt: 12_000 }),
+    );
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      notifications.length,
+      2,
+      "a join after the window closed must get its own alert, not be suppressed",
+    );
+
+    await unmount();
+  });
+
+  /**
+   * Teardown must drop the queued batch, not just its timer. On a community
+   * switch the effect re-keys, and keys accumulated for the old community must
+   * never flush against the new one.
+   */
+  it("does not deliver a queued batch after unmount", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook();
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER]));
+    await settle();
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB, CAROL], {
+        id: "queued-at-teardown",
+        createdAt: 13_000,
+      }),
+    );
+    await settle();
+    assert.equal(notifications.length, 0, "precondition: still queued");
+
+    await unmount();
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      notifications.length,
+      0,
+      "a torn-down mount must not fire its pending batch",
+    );
   });
 });

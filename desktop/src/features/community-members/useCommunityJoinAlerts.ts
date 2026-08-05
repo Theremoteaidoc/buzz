@@ -44,6 +44,21 @@ const KIND_NIP43_MEMBER_ADDED = 8000;
 const MEMBER_REFRESH_DEBOUNCE_MS = 500;
 
 /**
+ * Trailing quiet window for coalescing join alerts ACROSS snapshots.
+ *
+ * The per-snapshot cap bounds "one snapshot, many keys". It does nothing for
+ * "one burst, many snapshots": the relay republishes the whole 13534 as each
+ * concurrent add commits, so a 50-join storm arrives as a handful of growing
+ * rosters and each one independently emitted its own capped batch. Max measured
+ * 10 banners from 50 real joins at `fdeda44f0` for exactly this reason.
+ *
+ * Sized above the observed intermediate-snapshot cadence so a burst lands in
+ * one batch, and above MEMBER_REFRESH_DEBOUNCE_MS so an 8000-triggered refetch
+ * folds into the same window rather than flushing behind it.
+ */
+const JOIN_ALERT_NOTIFY_WINDOW_MS = 1_500;
+
+/**
  * Notify community owners/admins the first time a key appears in their roster.
  *
  * Delivery rests on a live kind:13534 subscription because that snapshot is the
@@ -84,63 +99,33 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
   const communityNameRef = React.useRef(communityName);
   communityNameRef.current = communityName;
 
-  const handleSnapshot = React.useEffectEvent(async (event: RelayEvent) => {
-    if (communityId === null) return;
+  // Pending cross-snapshot batch. A burst arrives as several growing rosters,
+  // so alerts accumulate here and flush once the roster stops moving.
+  //
+  // `pendingEventRef` holds the LATEST snapshot only, as the notification's
+  // click target. Every key in the batch is present in that roster (the ledger
+  // is monotonic within a burst), so the newest snapshot is the accurate
+  // referent for the whole batch.
+  const pendingRef = React.useRef<string[]>([]);
+  const pendingEventRef = React.useRef<RelayEvent | null>(null);
+  const notifyTimerRef = React.useRef<number | null>(null);
 
-    const roster = relayMembersFromEvent(event);
-    const rosterPubkeys = roster.map((member) => member.pubkey);
-    if (rosterPubkeys.length === 0) return;
-
-    // The roster can change shape without anything being new to us (a removal
-    // or a role change), so refresh the panel regardless of alert eligibility.
-    void queryClient.invalidateQueries({ queryKey: relayMembersQueryKey });
-
-    // Authorize against the snapshot in hand, not the cached role that mounted
-    // this effect. `useMyRelayMembershipLookupQuery` is only invalidated by this
-    // client's own membership mutations, and `staleTime` marks data stale
-    // without scheduling a refetch, so a viewer demoted by another admin keeps
-    // a cached owner/admin role for as long as the app stays open — and would
-    // otherwise keep learning every later joiner's identity from a role they no
-    // longer hold. The snapshot carries the viewer's own role
-    // (`["member", pubkey, role]`, relay-signed in `publish_nip43_membership_locked`),
-    // so the event that revokes authorization is the same event that would
-    // disclose the join. Checking it here closes that race in one read rather
-    // than racing an async invalidation.
-    //
-    // Fail closed: a snapshot that does not list the viewer at all means they
-    // were removed outright.
-    const viewerEntry = roster.find(
-      (member) => member.pubkey === normalizedViewer,
-    );
-    if (viewerEntry?.role !== "owner" && viewerEntry?.role !== "admin") {
-      // Refresh the mount gate so the subscriptions themselves tear down.
-      void queryClient.invalidateQueries({
-        queryKey: myRelayMembershipLookupQueryKey,
-      });
-      return;
+  /** Drop anything queued but not yet delivered. */
+  const clearPending = React.useCallback(() => {
+    pendingRef.current = [];
+    pendingEventRef.current = null;
+    if (notifyTimerRef.current !== null) {
+      window.clearTimeout(notifyTimerRef.current);
+      notifyTimerRef.current = null;
     }
+  }, []);
 
-    const { alerts, changed, ledger } = reconcileJoinAlertLedger({
-      ledger: ledgerRef.current,
-      rosterPubkeys,
-      viewerPubkey: normalizedViewer,
-    });
-    if (!changed) return;
-
-    // Persisted before notifying, never after: a crash between the two must
-    // lose the notification rather than repeat it on every later snapshot.
-    //
-    // A write that cannot land (quota still exceeded after cache eviction)
-    // leaves the ledger ref alone deliberately. Advancing it would mark these
-    // keys seen in memory while nothing reached storage, so the alert would be
-    // lost until a reload; leaving it means the next snapshot retries the
-    // write and the alert survives to whichever attempt lands. The notify is
-    // skipped either way — a false return means nothing was persisted, so
-    // notifying here is exactly the "repeat on every later snapshot" this
-    // ordering exists to prevent.
-    if (!writeJoinAlertLedger(communityId, normalizedViewer, ledger)) return;
-    ledgerRef.current = ledger;
-    if (alerts.length === 0) return;
+  const flushPending = React.useEffectEvent(async () => {
+    const alerts = pendingRef.current;
+    const event = pendingEventRef.current;
+    pendingRef.current = [];
+    pendingEventRef.current = null;
+    if (alerts.length === 0 || !event) return;
 
     // Resolve display names so the alert reads "Alice joined" rather than a
     // truncated key; a lookup failure degrades to the key, it does not skip.
@@ -182,6 +167,86 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
         title: joinAlertTitle(communityNameRef.current),
       });
     }
+  });
+
+  const handleSnapshot = React.useEffectEvent(async (event: RelayEvent) => {
+    if (communityId === null) return;
+
+    const roster = relayMembersFromEvent(event);
+    const rosterPubkeys = roster.map((member) => member.pubkey);
+    if (rosterPubkeys.length === 0) return;
+
+    // The roster can change shape without anything being new to us (a removal
+    // or a role change), so refresh the panel regardless of alert eligibility.
+    void queryClient.invalidateQueries({ queryKey: relayMembersQueryKey });
+
+    // Authorize against the snapshot in hand, not the cached role that mounted
+    // this effect. `useMyRelayMembershipLookupQuery` is only invalidated by this
+    // client's own membership mutations, and `staleTime` marks data stale
+    // without scheduling a refetch, so a viewer demoted by another admin keeps
+    // a cached owner/admin role for as long as the app stays open — and would
+    // otherwise keep learning every later joiner's identity from a role they no
+    // longer hold. The snapshot carries the viewer's own role
+    // (`["member", pubkey, role]`, relay-signed in `publish_nip43_membership_locked`),
+    // so the event that revokes authorization is the same event that would
+    // disclose the join. Checking it here closes that race in one read rather
+    // than racing an async invalidation.
+    //
+    // Fail closed: a snapshot that does not list the viewer at all means they
+    // were removed outright.
+    const viewerEntry = roster.find(
+      (member) => member.pubkey === normalizedViewer,
+    );
+    if (viewerEntry?.role !== "owner" && viewerEntry?.role !== "admin") {
+      // Revocation must also drop anything queued but not yet delivered.
+      // Batching across snapshots would otherwise reopen the disclosure Wren
+      // found as a *delayed* one: joins accumulated while authorized would
+      // still fire from a timer after the snapshot that revoked the role.
+      clearPending();
+      // Refresh the mount gate so the subscriptions themselves tear down.
+      void queryClient.invalidateQueries({
+        queryKey: myRelayMembershipLookupQueryKey,
+      });
+      return;
+    }
+
+    const { alerts, changed, ledger } = reconcileJoinAlertLedger({
+      ledger: ledgerRef.current,
+      rosterPubkeys,
+      viewerPubkey: normalizedViewer,
+    });
+    if (!changed) return;
+
+    // Persisted before notifying, never after: a crash between the two must
+    // lose the notification rather than repeat it on every later snapshot.
+    //
+    // A write that cannot land (quota still exceeded after cache eviction)
+    // leaves the ledger ref alone deliberately. Advancing it would mark these
+    // keys seen in memory while nothing reached storage, so the alert would be
+    // lost until a reload; leaving it means the next snapshot retries the
+    // write and the alert survives to whichever attempt lands. The notify is
+    // skipped either way — a false return means nothing was persisted, so
+    // notifying here is exactly the "repeat on every later snapshot" this
+    // ordering exists to prevent.
+    if (!writeJoinAlertLedger(communityId, normalizedViewer, ledger)) return;
+    ledgerRef.current = ledger;
+    if (alerts.length === 0) return;
+
+    // Queue rather than notify. Persistence and the ledger ref advance stay
+    // synchronous per snapshot (above), so cross-snapshot dedupe still holds
+    // and a crash before the flush loses the alert rather than repeating it —
+    // the ordering invariant this feature already committed to. Only the
+    // delivery is deferred, onto a trailing quiet window, so one burst
+    // produces one alert instead of one per intermediate snapshot.
+    pendingRef.current.push(...alerts);
+    pendingEventRef.current = event;
+    if (notifyTimerRef.current !== null) {
+      window.clearTimeout(notifyTimerRef.current);
+    }
+    notifyTimerRef.current = window.setTimeout(() => {
+      notifyTimerRef.current = null;
+      void flushPending();
+    }, JOIN_ALERT_NOTIFY_WINDOW_MS);
   });
 
   React.useEffect(() => {
@@ -258,8 +323,12 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
     return () => {
       disposed = true;
       if (refreshTimeout !== null) window.clearTimeout(refreshTimeout);
+      // Drop the queued batch too, not just its timer: on a community switch
+      // this effect re-keys, and keys accumulated for the old community must
+      // not flush against the new one.
+      clearPending();
       unsubscribeReconnect();
       for (const dispose of disposers) void dispose();
     };
-  }, [active, communityId, normalizedViewer]);
+  }, [active, communityId, normalizedViewer, clearPending]);
 }
