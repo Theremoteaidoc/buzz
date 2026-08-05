@@ -1931,6 +1931,163 @@ mod tests {
             .expect("sign timestamped event")
     }
 
+    fn make_event_at_with_keys(
+        keys: &Keys,
+        kind: u16,
+        content: &str,
+        created_at: u64,
+        tags: Vec<Tag>,
+    ) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(kind), content)
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("sign timestamped event")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn author_only_visibility_is_applied_before_historical_page_limit() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let owner = Keys::generate();
+        let foreign_owner = Keys::generate();
+        let base = 1_800_100_000;
+
+        // More than LIMIT newer foreign rows must not starve the owner's older
+        // row. Distinct d tags prevent NIP-33 replacement from collapsing the
+        // setup into one row per author.
+        for offset in 10..14 {
+            let event = make_event_at_with_keys(
+                &foreign_owner,
+                30_179,
+                "newer foreign private aggregate",
+                base + offset,
+                vec![Tag::parse(["d", &format!("foreign-{offset}")]).unwrap()],
+            );
+            insert_event(&pool, community, &event, None)
+                .await
+                .expect("insert foreign private aggregate");
+        }
+        let owner_event = make_event_at_with_keys(
+            &owner,
+            30_179,
+            "older owner private aggregate",
+            base + 1,
+            vec![Tag::parse(["d", "owner"]).unwrap()],
+        );
+        insert_event(&pool, community, &owner_event, None)
+            .await
+            .expect("insert owner private aggregate");
+
+        let events = query_events(
+            &pool,
+            &EventQuery {
+                kinds: Some(vec![30_179]),
+                limit: Some(2),
+                author_only_reader: Some(owner.public_key().to_bytes().to_vec()),
+                ..EventQuery::for_community(community)
+            },
+        )
+        .await
+        .expect("query owner-visible private aggregates");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event.id, owner_event.id);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn author_only_count_hides_foreign_explicit_mixed_and_kindless_queries() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let owner = Keys::generate();
+        let foreign_owner = Keys::generate();
+        let owner_event = make_event_at_with_keys(
+            &owner,
+            30_179,
+            "owner private aggregate",
+            1_800_200_001,
+            vec![Tag::parse(["d", "owner"]).unwrap()],
+        );
+        let foreign_event = make_event_at_with_keys(
+            &foreign_owner,
+            30_179,
+            "foreign private aggregate",
+            1_800_200_002,
+            vec![Tag::parse(["d", "foreign"]).unwrap()],
+        );
+        for event in [&owner_event, &foreign_event] {
+            insert_event(&pool, community, event, None)
+                .await
+                .expect("insert private aggregate");
+        }
+
+        let reader = owner.public_key().to_bytes().to_vec();
+        let kindless_foreign_query = EventQuery {
+            ids: Some(vec![foreign_event.id.as_bytes().to_vec()]),
+            author_only_reader: Some(reader.clone()),
+            ..EventQuery::for_community(community)
+        };
+        assert!(
+            query_events(&pool, &kindless_foreign_query)
+                .await
+                .expect("query kindless foreign id")
+                .is_empty(),
+            "a kindless ID query must not reveal a foreign author-only row"
+        );
+
+        for (label, query) in [
+            (
+                "explicit kind",
+                EventQuery {
+                    kinds: Some(vec![30_179]),
+                    authors: Some(vec![foreign_owner.public_key().to_bytes().to_vec()]),
+                    author_only_reader: Some(reader.clone()),
+                    ..EventQuery::for_community(community)
+                },
+            ),
+            (
+                "mixed kinds",
+                EventQuery {
+                    kinds: Some(vec![1, 30_179]),
+                    authors: Some(vec![foreign_owner.public_key().to_bytes().to_vec()]),
+                    author_only_reader: Some(reader.clone()),
+                    ..EventQuery::for_community(community)
+                },
+            ),
+            (
+                "kindless id",
+                EventQuery {
+                    ids: Some(vec![foreign_event.id.as_bytes().to_vec()]),
+                    author_only_reader: Some(reader.clone()),
+                    ..EventQuery::for_community(community)
+                },
+            ),
+        ] {
+            assert_eq!(
+                count_events(&pool, &query).await.expect(label),
+                0,
+                "{label} must not disclose a foreign author-only row"
+            );
+        }
+
+        assert_eq!(
+            count_events(
+                &pool,
+                &EventQuery {
+                    kinds: Some(vec![30_179]),
+                    author_only_reader: Some(reader),
+                    ..EventQuery::for_community(community)
+                },
+            )
+            .await
+            .expect("count owner private aggregate"),
+            1,
+            "the owner's own count remains exact"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn access_scope_is_applied_before_historical_page_limit() {
