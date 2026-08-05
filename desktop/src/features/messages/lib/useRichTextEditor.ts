@@ -29,6 +29,7 @@ import {
 import { CUSTOM_EMOJI_NODE_NAME } from "./customEmojiNode";
 import { useComposerCustomEmoji } from "./useComposerCustomEmoji";
 import { buildPlainTextProjection } from "./plainTextProjection";
+import { parseSnapshotClipboardHtml } from "./agentSnapshotClipboard";
 import { buildPreviewUpdate } from "./linkPreviewContent";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
 import {
@@ -137,12 +138,8 @@ function shouldAppendSpaceAfterPaste(text: string): boolean {
 }
 
 function unwrapExactHttpLink(text: string): string | null {
-  return (
-    /^(?:<(https?:\/\/[^\s<>]+)>|(https?:\/\/\S+))$/i
-      .exec(text)
-      ?.slice(1)
-      .find(Boolean) ?? null
-  );
+  const match = /^(?:<(https?:\/\/[^\s<>]+)>|(https?:\/\/\S+))$/i.exec(text);
+  return match?.[1] ?? match?.[2] ?? null;
 }
 
 const LinkPasteTrailingSpace = Extension.create({
@@ -499,9 +496,13 @@ export function useRichTextEditor({
       editorProps: {
         handleDOMEvents: {
           paste: (view, event) => {
+            const clipboard = (event as ClipboardEvent).clipboardData;
+            if (
+              parseSnapshotClipboardHtml(clipboard?.getData("text/html") ?? "")
+            )
+              return false;
             const url = unwrapExactHttpLink(
-              (event as ClipboardEvent).clipboardData?.getData("text/plain") ??
-                "",
+              clipboard?.getData("text/plain") ?? "",
             );
             if (!url) return false;
             const link = view.state.schema.marks.link;
