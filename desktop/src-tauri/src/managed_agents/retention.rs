@@ -230,21 +230,63 @@ pub fn get_retained_managed_agent_aggregate(
           ORDER BY generation DESC
           LIMIT 1",
         params![owner_pubkey, agent_pubkey],
-        |row| {
-            Ok(RetainedManagedAgentAggregate {
-                owner_pubkey: row.get(0)?,
-                agent_pubkey: row.get(1)?,
-                generation: row.get::<_, i64>(2)? as u64,
-                private_event_id: row.get(3)?,
-                state: row.get(4)?,
-                request_json: row.get(5)?,
-                pending_sync: row.get::<_, i32>(6)? != 0,
-                last_error: row.get(7)?,
-            })
-        },
+        aggregate_from_row,
     )
     .optional()
     .map_err(|e| format!("failed to get retained managed-agent aggregate: {e}"))
+}
+
+/// Snapshot every pending aggregate attempt for one captured owner scope.
+///
+/// At most one generation per agent may be pending during normal operation,
+/// but selecting the latest pending generation defensively avoids replaying a
+/// superseded row after a crash between generation advance and acknowledgement.
+pub fn get_pending_managed_agent_aggregates(
+    conn: &Connection,
+    owner_pubkey: &str,
+) -> Result<Vec<RetainedManagedAgentAggregate>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.owner_pubkey, a.agent_pubkey, a.generation,
+                    a.private_event_id, a.state, a.request_json,
+                    a.pending_sync, a.last_error
+               FROM managed_agent_aggregates a
+              WHERE a.owner_pubkey = ?1 AND a.pending_sync = 1
+                AND a.generation = (
+                    SELECT MAX(latest.generation)
+                      FROM managed_agent_aggregates latest
+                     WHERE latest.owner_pubkey = a.owner_pubkey
+                       AND latest.agent_pubkey = a.agent_pubkey
+                )
+              ORDER BY a.agent_pubkey",
+        )
+        .map_err(|e| format!("failed to prepare pending managed-agent aggregates: {e}"))?;
+    let rows = stmt
+        .query_map(params![owner_pubkey], aggregate_from_row)
+        .map_err(|e| format!("failed to query pending managed-agent aggregates: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to read pending managed-agent aggregate: {e}"))
+}
+
+fn aggregate_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RetainedManagedAgentAggregate> {
+    let generation = row.get::<_, i64>(2)?;
+    let generation = u64::try_from(generation).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            2,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })?;
+    Ok(RetainedManagedAgentAggregate {
+        owner_pubkey: row.get(0)?,
+        agent_pubkey: row.get(1)?,
+        generation,
+        private_event_id: row.get(3)?,
+        state: row.get(4)?,
+        request_json: row.get(5)?,
+        pending_sync: row.get::<_, i32>(6)? != 0,
+        last_error: row.get(7)?,
+    })
 }
 
 /// Mark one exact retained aggregate request as confirmed by relay read-back.
@@ -809,6 +851,30 @@ mod tests {
             .unwrap(),
             2
         );
+    }
+
+    #[test]
+    fn pending_aggregate_snapshot_is_owner_scoped_and_latest_only() {
+        let mut conn = test_db();
+        retain_managed_agent_aggregate(
+            &mut conn,
+            &aggregate(1, "event-a1", "active", r#"{"generation":1}"#),
+        )
+        .unwrap();
+        retain_managed_agent_aggregate(
+            &mut conn,
+            &aggregate(2, "event-a2", "deleted", r#"{"generation":2}"#),
+        )
+        .unwrap();
+        let mut other = aggregate(1, "event-b1", "active", r#"{"generation":1}"#);
+        other.owner_pubkey = "other-owner".into();
+        other.agent_pubkey = "other-agent".into();
+        retain_managed_agent_aggregate(&mut conn, &other).unwrap();
+
+        let pending = get_pending_managed_agent_aggregates(&conn, "owner").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].generation, 2);
+        assert_eq!(pending[0].private_event_id, "event-a2");
     }
 
     #[test]
