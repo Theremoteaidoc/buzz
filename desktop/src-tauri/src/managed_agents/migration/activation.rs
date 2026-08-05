@@ -38,6 +38,151 @@ struct AggregateRequest<'a> {
     expected_definition_revision: u64,
 }
 
+#[derive(Deserialize)]
+struct StoredAggregateRequest {
+    definition_event: nostr::Event,
+    expected_definition_revision: u64,
+}
+
+/// Build and durably retain the next authoritative instance-edit aggregate.
+/// Called under the managed-agent store lock before any local record save.
+pub(crate) fn enqueue_authoritative_edit(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    record: &crate::managed_agents::ManagedAgentRecord,
+) -> Result<(), String> {
+    let evidence = record
+        .relay_authority
+        .evidence()
+        .ok_or_else(|| "authoritative edit is missing relay evidence".to_string())?;
+    if record.relay_authority.is_deleting() {
+        return Err("cannot edit an agent while deletion is pending".to_string());
+    }
+    let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+    let owner_pubkey = scope.owner_keys.public_key().to_hex();
+    let mut conn = open_retention_db(&scope.db_path)?;
+    let retained = get_retained_managed_agent_aggregate(&conn, &owner_pubkey, &record.pubkey)?
+        .ok_or_else(|| "authoritative edit is missing its retained relay head".to_string())?;
+    if retained.pending_sync {
+        return Err("managed-agent relay synchronization is still pending; retry the edit shortly".to_string());
+    }
+    if retained.state != "active"
+        || retained.generation != evidence.generation
+        || retained.private_event_id != evidence.private_event_id
+    {
+        return Err("local relay evidence does not match the retained authoritative head".to_string());
+    }
+    let stored: StoredAggregateRequest = serde_json::from_str(&retained.request_json)
+        .map_err(|error| format!("retained authoritative request is invalid: {error}"))?;
+    let instance_event = managed_agents::agent_events::build_agent_event(record)?
+        .custom_created_at(nostr::Timestamp::now())
+        .sign_with_keys(&scope.owner_keys)
+        .map_err(|error| format!("failed to sign authoritative instance edit: {error}"))?;
+    let agent_keys = Keys::parse(&record.private_key_nsec)
+        .map_err(|error| format!("agent key does not parse for authoritative edit: {error}"))?;
+    let generation = evidence
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| "managed-agent aggregate generation overflow".to_string())?;
+    let candidate = build_migration_candidate(
+        record,
+        &scope.owner_keys,
+        &agent_keys,
+        stored.definition_event,
+        instance_event,
+        &CasMetadata {
+            generation,
+            previous_event_id: Some(evidence.private_event_id.clone()),
+            definition_revision: stored.expected_definition_revision,
+        },
+        [NIP_PMA_AGGREGATE_TOKEN],
+        nostr::Timestamp::now().as_secs(),
+    )
+    .map_err(|error| format!("failed to build authoritative edit: {error:?}"))?;
+    let request_json = serde_json::to_string(&AggregateRequest {
+        private_event: &candidate.signed_event,
+        definition_event: &candidate.definition_event,
+        instance_event: &candidate.instance_event,
+        expected_definition_revision: stored.expected_definition_revision,
+    })
+    .map_err(|error| format!("failed to serialize authoritative edit: {error}"))?;
+    retain_managed_agent_aggregate(
+        &mut conn,
+        &RetainedManagedAgentAggregate {
+            owner_pubkey,
+            agent_pubkey: record.pubkey.clone(),
+            generation,
+            private_event_id: candidate.signed_event.id.to_hex(),
+            state: "active".to_string(),
+            request_json,
+            pending_sync: true,
+            last_error: None,
+            local_authority_applied: false,
+        },
+    )
+}
+
+pub(crate) struct VerifiedAuthoritativeEdit {
+    pub owner_pubkey: String,
+    pub agent_pubkey: String,
+    pub generation: u64,
+    pub private_event_id: String,
+    pub evidence: RelayAuthorityEvidence,
+}
+
+pub(crate) async fn submit_authoritative_edit(
+    client: &reqwest::Client,
+    relay_api_base_url: &str,
+    owner_keys: &Keys,
+    db_path: &Path,
+    agent_pubkey: &str,
+) -> Result<VerifiedAuthoritativeEdit, String> {
+    let owner_pubkey = owner_keys.public_key().to_hex();
+    match super::driver::submit_retained_aggregate(
+        client,
+        relay_api_base_url,
+        db_path,
+        owner_keys,
+        &owner_pubkey,
+        agent_pubkey,
+    )
+    .await?
+    {
+        super::driver::SubmitOutcome::Verified { attempt, evidence } => {
+            Ok(VerifiedAuthoritativeEdit {
+                owner_pubkey: attempt.owner_pubkey,
+                agent_pubkey: attempt.agent_pubkey,
+                generation: attempt.generation,
+                private_event_id: attempt.private_event_id,
+                evidence: RelayAuthorityEvidence {
+                    generation: evidence.generation,
+                    private_event_id: evidence.head_event_id,
+                },
+            })
+        }
+        super::driver::SubmitOutcome::Retained { error } => Err(error),
+        other => Err(format!("authoritative edit did not verify: {other:?}")),
+    }
+}
+
+pub(crate) fn confirm_authoritative_edit(
+    db_path: &Path,
+    edit: &VerifiedAuthoritativeEdit,
+) -> Result<(), String> {
+    let conn = open_retention_db(db_path)?;
+    if mark_managed_agent_aggregate_synced(
+        &conn,
+        &edit.owner_pubkey,
+        &edit.agent_pubkey,
+        edit.generation,
+        &edit.private_event_id,
+    )? {
+        Ok(())
+    } else {
+        Err("verified authoritative edit no longer matches retained attempt".to_string())
+    }
+}
+
 /// Discover relay extensions from the captured workspace HTTP origin.
 pub(crate) async fn discover_relay_extensions(
     client: &reqwest::Client,
@@ -212,9 +357,14 @@ pub(crate) async fn flush_pending_migrations(
                 .map_err(|error| error.to_string())?;
             let mut records = load_managed_agents(app)?;
             if let Some(index) = records.iter().position(|record| {
+                let authority_can_advance = record.relay_authority.evidence().is_some_and(|head| {
+                    head.generation.checked_add(1) == Some(evidence.generation)
+                        && evidence.previous_event_id.as_deref()
+                            == Some(head.private_event_id.as_str())
+                });
                 record.pubkey == attempt.agent_pubkey
                     && record.updated_at == attempt.source_updated_at
-                    && !record.relay_authority.is_relay_authoritative()
+                    && (!record.relay_authority.is_relay_authoritative() || authority_can_advance)
             }) {
                 records[index].relay_authority =
                     RelayAuthority::relay_authoritative(RelayAuthorityEvidence {

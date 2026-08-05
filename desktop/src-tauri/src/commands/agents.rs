@@ -44,6 +44,12 @@ pub(super) fn retain_managed_agent_pending(
     state: &AppState,
     record: &ManagedAgentRecord,
 ) {
+    // Once kind:30179 is canonical, ordinary kind:30177 writes are fenced by
+    // the relay. Authoritative mutations must use the aggregate CAS path; do
+    // not feed a permanently failing legacy retry rail.
+    if record.relay_authority.is_relay_authoritative() {
+        return;
+    }
     use crate::managed_agents::{reconcile::retain_agent_record, retention::open_retention_db};
 
     let result = (|| -> Result<(), String> {

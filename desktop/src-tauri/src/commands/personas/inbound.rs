@@ -259,7 +259,7 @@ fn reconcile_inbound_private_managed_agent(
     Ok(())
 }
 
-fn reconstruct_managed_agent_from_payload(
+pub(crate) fn reconstruct_managed_agent_from_payload(
     payload: &buzz_core_pkg::private_managed_agent::Payload,
     private_event: &nostr::Event,
 ) -> Result<ManagedAgentRecord, String> {

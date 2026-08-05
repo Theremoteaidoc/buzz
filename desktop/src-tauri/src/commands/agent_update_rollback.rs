@@ -7,7 +7,7 @@ use crate::{
     },
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct AgentUpdateRollback {
     attempted_record: ManagedAgentRecord,
     previous_record: ManagedAgentRecord,

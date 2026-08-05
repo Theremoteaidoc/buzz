@@ -737,7 +737,7 @@ pub async fn update_managed_agent(
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
     // Phase 1: local save (synchronous, under lock)
-    let (summary, sync_params, rollback) = {
+    let (summary, sync_params, rollback, authoritative_edit) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -854,6 +854,13 @@ pub async fn update_managed_agent(
 
         record.updated_at = now_iso();
 
+        let authoritative_edit = record.relay_authority.is_relay_authoritative();
+        if authoritative_edit {
+            crate::managed_agents::migration::activation::enqueue_authoritative_edit(
+                &app, &state, record,
+            )?;
+        }
+
         save_managed_agents(&app, &records)?;
 
         let record = records
@@ -901,11 +908,62 @@ pub async fn update_managed_agent(
                 &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
             )?
         };
-        let rollback = name_changed.then(|| AgentUpdateRollback::new(previous_record, record));
-        (summary, sync_params, rollback)
+        let rollback = (name_changed || authoritative_edit)
+            .then(|| AgentUpdateRollback::new(previous_record, record));
+        (summary, sync_params, rollback, authoritative_edit)
     }; // lock dropped here
 
     try_regenerate_nest(&app);
+
+    if authoritative_edit {
+        let scope = crate::managed_agents::retention::active_retention_scope(&app, &state)?;
+        let relay_api = crate::relay::relay_http_base_url(&scope.relay_url);
+        let verified =
+            match crate::managed_agents::migration::activation::submit_authoritative_edit(
+                &state.http_client,
+                &relay_api,
+                &scope.owner_keys,
+                &scope.db_path,
+                &summary.pubkey,
+            )
+            .await
+            {
+                Ok(verified) => verified,
+                Err(sync_error) => {
+                    let rollback = rollback.as_ref().ok_or_else(|| {
+                        "missing local rollback state after authoritative relay failure".to_string()
+                    })?;
+                    rollback_failed_agent_update(
+                        &app,
+                        &state,
+                        &summary.pubkey,
+                        rollback.clone(),
+                    )?;
+                    return Err(format!(
+                        "Agent edit failed before relay authority could be confirmed. No local changes were kept: {sync_error}"
+                    ));
+                }
+            };
+        {
+            let _guard = state
+                .managed_agents_store_lock
+                .lock()
+                .map_err(|error| error.to_string())?;
+            let mut records = load_managed_agents(&app)?;
+            let record = records
+                .iter_mut()
+                .find(|record| record.pubkey == summary.pubkey)
+                .ok_or_else(|| format!("agent {} not found after relay edit", summary.pubkey))?;
+            record.relay_authority = crate::managed_agents::RelayAuthority::relay_authoritative(
+                verified.evidence.clone(),
+            );
+            save_managed_agents(&app, &records)?;
+        }
+        crate::managed_agents::migration::activation::confirm_authoritative_edit(
+            &scope.db_path,
+            &verified,
+        )?;
+    }
 
     // Phase 2: relay profile sync (async, outside lock). A rename is committed
     // only when this succeeds; otherwise restore the complete pre-edit record
