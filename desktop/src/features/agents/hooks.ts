@@ -40,7 +40,6 @@ import {
   updateManagedAgent,
 } from "@/shared/api/tauri";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
-import { getAgentAccessOwnerOnly } from "@/shared/api/tauriAgentAccess";
 import {
   setManagedAgentAutoRestart,
   setManagedAgentStartOnAppLaunch,
@@ -947,21 +946,6 @@ export function useRuntimeFileConfigQuery(
 
 export const bakedBuildEnvKeysQueryKey = ["baked-build-env-keys"] as const;
 export const bakedBuildEnvQueryKey = ["baked-build-env"] as const;
-export const agentAccessOwnerOnlyQueryKey = [
-  "agent-access-owner-only",
-] as const;
-
-export function useAgentAccessOwnerOnlyQuery(options?: { enabled?: boolean }) {
-  return useQuery({
-    queryKey: agentAccessOwnerOnlyQueryKey,
-    queryFn: () => getAgentAccessOwnerOnly(),
-    enabled: options?.enabled ?? true,
-    staleTime: Infinity,
-    refetchInterval: false,
-    retry: false,
-  });
-}
-
 /**
  * Query safely displayable baked build env entries. The backend masks secrets,
  * so this is only used for inherited provider/model/effort labels.

@@ -1,9 +1,7 @@
 import * as React from "react";
 
-import {
-  useAgentAccessOwnerOnlyQuery,
-  useUpdateManagedAgentMutation,
-} from "@/features/agents/hooks";
+import { useUpdateManagedAgentMutation } from "@/features/agents/hooks";
+import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/useAgentAccessOwnerOnly";
 import { runLocationForBackend } from "@/features/agents/lib/agentAccessWarning";
 import {
   CreateAgentRespondToField,

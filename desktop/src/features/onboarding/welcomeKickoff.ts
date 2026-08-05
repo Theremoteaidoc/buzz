@@ -3,9 +3,9 @@ import * as React from "react";
 import {
   managedAgentsQueryKey,
   useAcpRuntimesQuery,
-  useAgentAccessOwnerOnlyQuery,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
+import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/useAgentAccessOwnerOnly";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
 import { useCommunities } from "@/features/communities/useCommunities";

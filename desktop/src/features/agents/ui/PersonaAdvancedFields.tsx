@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useAgentAccessOwnerOnlyQuery } from "../hooks";
+import { useAgentAccessOwnerOnlyQuery } from "../useAgentAccessOwnerOnly";
 import { Input } from "@/shared/ui/input";
 import { cn } from "@/shared/lib/cn";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
