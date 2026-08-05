@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   activateWelcomeTeamPersonasSequentially,
   buildWelcomeStarterCreateInput,
+  hydrateWelcomeTeamAgentsBeforeProvision,
   LEGACY_WELCOME_GUIDE_SYSTEM_PROMPT,
   pickWelcomeGuideAgent,
   pickWelcomeGuideAgentForRelay,
@@ -14,6 +15,30 @@ import {
   WELCOME_TEAM_ID,
   WELCOME_TEAM_STARTERS,
 } from "./welcomeGuide.ts";
+
+test("Welcome provisioning awaits relay hydration before inspecting agents", async () => {
+  const calls = [];
+  await hydrateWelcomeTeamAgentsBeforeProvision(
+    "wss://relay.example///",
+    async () => {
+      calls.push("identity");
+      return { pubkey: PUB_A };
+    },
+    async (pubkey, relayUrl) => {
+      calls.push(`hydrate:${pubkey}:${relayUrl}`);
+    },
+  );
+  assert.deepEqual(calls, ["identity", `hydrate:${PUB_A}:wss://relay.example`]);
+});
+
+test("Welcome provisioning skips hydration without a relay scope", async () => {
+  let called = false;
+  await hydrateWelcomeTeamAgentsBeforeProvision(null, async () => {
+    called = true;
+    return { pubkey: PUB_A };
+  });
+  assert.equal(called, false);
+});
 
 const PUB_A = "a".repeat(64);
 const PUB_B = "b".repeat(64);

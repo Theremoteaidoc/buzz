@@ -1,3 +1,4 @@
+import { hydratePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import {
   buildInstanceInputForDefinition,
   resolveStartRuntimeForDefinition,
@@ -11,6 +12,7 @@ import {
   updateManagedAgent,
 } from "@/shared/api/tauri";
 import { getGlobalAgentConfig } from "@/shared/api/tauriGlobalAgentConfig";
+import { getIdentity } from "@/shared/api/tauriIdentity";
 import { listPersonas, setPersonaActive } from "@/shared/api/tauriPersonas";
 import type {
   AcpRuntime,
@@ -51,6 +53,17 @@ const welcomeTeamPromises = new Map<string, Promise<WelcomeTeamAgents>>();
 
 function normalizeRelayUrl(relayUrl: string | null | undefined) {
   return relayUrl?.trim().replace(/\/+$/, "") ?? null;
+}
+
+export async function hydrateWelcomeTeamAgentsBeforeProvision(
+  relayUrl: string | null | undefined,
+  resolveIdentity: typeof getIdentity = getIdentity,
+  hydrate: typeof hydratePersonaSync = hydratePersonaSync,
+): Promise<void> {
+  const normalizedRelay = normalizeRelayUrl(relayUrl);
+  if (!normalizedRelay) return;
+  const identity = await resolveIdentity();
+  await hydrate(identity.pubkey, normalizedRelay);
 }
 
 function isAgentScopedToRelay(agent: ManagedAgent, relayUrl?: string | null) {
@@ -269,6 +282,7 @@ async function provisionWelcomeTeam(
   channelId: string,
   relayUrl?: string | null,
 ): Promise<WelcomeTeamAgents> {
+  await hydrateWelcomeTeamAgentsBeforeProvision(relayUrl);
   const existingAgents = await listManagedAgents();
   await ensureWelcomeTeamPersonasActive();
   const [personas, runtimeCatalog, globalConfig] = await Promise.all([

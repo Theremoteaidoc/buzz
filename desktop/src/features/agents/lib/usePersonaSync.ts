@@ -22,6 +22,23 @@ const PERSONA_SYNC_KINDS = [
   KIND_DELETION,
 ];
 
+export async function hydratePersonaSync(
+  pubkey: string,
+  relayUrl: string,
+  onCancelled: () => boolean = () => false,
+): Promise<void> {
+  const events = await relayClient.fetchEvents({
+    kinds: PERSONA_SYNC_KINDS,
+    authors: [pubkey],
+    limit: 500,
+  });
+  for (const event of events) {
+    if (onCancelled()) return;
+    if (event.pubkey !== pubkey) continue;
+    await reconcileInboundPersonaEvent(JSON.stringify(event), relayUrl);
+  }
+}
+
 // Start the persona/team/agent/deletion sync for `pubkey` on `relayUrl`:
 // one-shot backfill of existing heads + tombstones, then a live subscription.
 // Returns a disposer that closes the live subscription. Extracted from the hook
@@ -48,15 +65,9 @@ export function startPersonaSync(
 
   // One-shot backfill of existing heads + tombstones (closes the fresh-start
   // gap that live-only subscription + reconnect-replay cannot recover).
-  void relayClient
-    .fetchEvents({ kinds: PERSONA_SYNC_KINDS, authors: [pubkey], limit: 500 })
-    .then((events) => {
-      if (onCancelled()) return;
-      for (const event of events) reconcile(event);
-    })
-    .catch((error) => {
-      console.warn("[usePersonaSync] backfill failed:", error);
-    });
+  void hydratePersonaSync(pubkey, relayUrl, onCancelled).catch((error) => {
+    console.warn("[usePersonaSync] backfill failed:", error);
+  });
 
   let unsub: (() => Promise<void>) | null = null;
   void relayClient
