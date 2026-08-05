@@ -880,6 +880,28 @@ pub async fn soft_delete_by_coordinate(
 ) -> Result<bool> {
     let deletion_created_at = DateTime::from_timestamp(deletion_created_at_secs, 0)
         .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
+    let mut tx = pool.begin().await?;
+    let lock_key =
+        super::event_replacement_lock_key(community_id, kind, pubkey, Some(d_tag.as_bytes()));
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut *tx)
+        .await?;
+    if matches!(
+        kind as u32,
+        buzz_core::kind::KIND_PERSONA | buzz_core::kind::KIND_MANAGED_AGENT
+    ) && crate::managed_agent::projection_coordinate_is_authoritative_on(
+        &mut *tx,
+        community_id,
+        kind as u32,
+        pubkey,
+        d_tag,
+    )
+    .await?
+    {
+        tx.rollback().await?;
+        return Ok(false);
+    }
     let result = sqlx::query(
         "UPDATE events SET deleted_at = NOW() \
          WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
@@ -890,8 +912,9 @@ pub async fn soft_delete_by_coordinate(
     .bind(pubkey)
     .bind(d_tag)
     .bind(deletion_created_at)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -909,6 +932,42 @@ pub async fn soft_delete_event_and_update_thread(
     root_event_id: Option<&[u8]>,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
+
+    let coordinate: Option<(i32, Vec<u8>, Option<String>)> =
+        sqlx::query_as("SELECT kind,pubkey,d_tag FROM events WHERE community_id=$1 AND id=$2")
+            .bind(community_id.as_uuid())
+            .bind(event_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if let Some((kind, pubkey, Some(d_tag))) = coordinate {
+        if matches!(
+            kind as u32,
+            buzz_core::kind::KIND_PERSONA | buzz_core::kind::KIND_MANAGED_AGENT
+        ) {
+            let lock_key = super::event_replacement_lock_key(
+                community_id,
+                kind,
+                &pubkey,
+                Some(d_tag.as_bytes()),
+            );
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(lock_key)
+                .execute(&mut *tx)
+                .await?;
+            if crate::managed_agent::projection_coordinate_is_authoritative_on(
+                &mut *tx,
+                community_id,
+                kind as u32,
+                &pubkey,
+                &d_tag,
+            )
+            .await?
+            {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        }
+    }
 
     let result = sqlx::query(
         "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",

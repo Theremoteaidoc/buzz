@@ -4798,6 +4798,24 @@ impl Db {
         managed_agent::projection_is_authoritative(&self.pool, community_id, event, d_tag).await
     }
 
+    /// Whether a projection coordinate is controlled by a PMA head.
+    pub async fn managed_agent_projection_coordinate_is_authoritative(
+        &self,
+        community_id: CommunityId,
+        kind: u32,
+        owner: &[u8],
+        d_tag: &str,
+    ) -> Result<bool> {
+        managed_agent::projection_coordinate_is_authoritative(
+            &self.pool,
+            community_id,
+            kind,
+            owner,
+            d_tag,
+        )
+        .await
+    }
+
     /// Keeps only the event with the highest `created_at` per `(kind, pubkey, d_tag)`.
     /// Same-second ties are broken by lowest event `id` (deterministic ordering).
     /// The entire check → retire old payload → insert runs in a single transaction
@@ -4843,6 +4861,26 @@ impl Db {
             .bind(lock_key)
             .execute(&mut *tx)
             .await?;
+
+        // The pre-ingest authority check is only an early rejection. Recheck
+        // after taking the coordinate lock so a first aggregate that raced us
+        // cannot be overwritten after binding this projection coordinate.
+        if matches!(
+            kind_i32 as u32,
+            buzz_core::kind::KIND_PERSONA | buzz_core::kind::KIND_MANAGED_AGENT
+        ) && managed_agent::projection_coordinate_is_authoritative_on(
+            &mut *tx,
+            community_id,
+            kind_i32 as u32,
+            pubkey_bytes.as_slice(),
+            d_tag,
+        )
+        .await?
+        {
+            return Err(DbError::ManagedAgentConflict(
+                "projection is controlled by a private managed-agent aggregate".into(),
+            ));
+        }
 
         let d_tag_count = event
             .tags

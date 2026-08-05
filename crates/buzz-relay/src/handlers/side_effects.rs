@@ -2165,6 +2165,30 @@ async fn handle_a_tag_deletion(
                     ));
                 }
             };
+            // PMA-bound projections may only be retired by advancing the
+            // private aggregate generation. A legacy kind:5 is retained as an
+            // offline compatibility signal but cannot mutate canonical state.
+            if matches!(
+                k,
+                buzz_core::kind::KIND_PERSONA | buzz_core::kind::KIND_MANAGED_AGENT
+            ) && state
+                .db
+                .managed_agent_projection_coordinate_is_authoritative(
+                    tenant.community(),
+                    k,
+                    &pubkey_bytes,
+                    d_tag,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("PMA deletion fence failed: {e}"))?
+            {
+                tracing::debug!(
+                    kind = k,
+                    d_tag,
+                    "NIP-09 deletion ignored for PMA projection"
+                );
+                return Ok(());
+            }
             // Safe cast: NIP-33 kinds are 30000–39999, well within i32.
             let kind_i32 = k as i32;
             // NIP-09 scopes an a-tag deletion to versions at or before the
@@ -2233,10 +2257,42 @@ async fn handle_standard_deletion_event(
             Some(target) => target,
             None => continue,
         };
-        if u32::from(target_event.event.kind.as_u16()) == super::push_lease::KIND_PUSH_LEASE {
+        let target_kind = u32::from(target_event.event.kind.as_u16());
+        if target_kind == super::push_lease::KIND_PUSH_LEASE {
             tracing::debug!(
                 target_id = %hex::encode(&target_id),
                 "NIP-09 deletion ignored for push lease"
+            );
+            continue;
+        }
+        if matches!(
+            target_kind,
+            buzz_core::kind::KIND_PERSONA | buzz_core::kind::KIND_MANAGED_AGENT
+        ) {
+            let d_tag = buzz_db::event::extract_d_tag(&target_event.event).unwrap_or_default();
+            if state
+                .db
+                .managed_agent_projection_coordinate_is_authoritative(
+                    tenant.community(),
+                    target_kind,
+                    &target_event.event.pubkey.to_bytes(),
+                    &d_tag,
+                )
+                .await?
+            {
+                tracing::debug!(
+                    target_id = %hex::encode(&target_id),
+                    kind = target_kind,
+                    d_tag,
+                    "NIP-09 deletion ignored for PMA projection"
+                );
+                continue;
+            }
+        }
+        if target_kind == buzz_core::kind::KIND_PRIVATE_MANAGED_AGENT {
+            tracing::debug!(
+                target_id = %hex::encode(&target_id),
+                "NIP-09 deletion ignored for private managed-agent head"
             );
             continue;
         }

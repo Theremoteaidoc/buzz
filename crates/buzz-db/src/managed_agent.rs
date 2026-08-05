@@ -304,6 +304,14 @@ async fn commit_aggregate_once(
         }
     }
 
+    let instance_d = envelope.agent_pubkey.to_hex();
+    let instance_lock =
+        super::event_replacement_lock_key(community, 30177, &owner, Some(instance_d.as_bytes()));
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(instance_lock)
+        .execute(&mut *tx)
+        .await?;
+
     let definition_revision = if let (Some(d), Some(definition_id), Some(hash)) =
         (&definition_d, &definition_event_id, &definition_hash)
     {
@@ -416,6 +424,47 @@ pub async fn read_head(
     .transpose()
 }
 
+/// Whether a projection coordinate is controlled by a PMA head.
+pub async fn projection_coordinate_is_authoritative(
+    pool: &PgPool,
+    community: CommunityId,
+    kind: u32,
+    owner: &[u8],
+    d_tag: &str,
+) -> Result<bool> {
+    let mut connection = pool.acquire().await?;
+    projection_coordinate_is_authoritative_on(&mut connection, community, kind, owner, d_tag).await
+}
+
+pub(crate) async fn projection_coordinate_is_authoritative_on(
+    connection: &mut sqlx::PgConnection,
+    community: CommunityId,
+    kind: u32,
+    owner: &[u8],
+    d_tag: &str,
+) -> Result<bool> {
+    let exists = match kind {
+        30177 => {
+            let agent = hex::decode(d_tag)
+                .map_err(|_| invalid("invalid managed-agent d tag"))?;
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM managed_agent_heads WHERE community_id=$1 AND owner_pubkey=$2 AND agent_pubkey=$3)")
+                .bind(community.as_uuid())
+                .bind(owner)
+                .bind(agent)
+                .fetch_one(&mut *connection)
+                .await?
+        }
+        30175 => sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM managed_agent_heads WHERE community_id=$1 AND owner_pubkey=$2 AND definition_d=$3)")
+            .bind(community.as_uuid())
+            .bind(owner)
+            .bind(d_tag)
+            .fetch_one(&mut *connection)
+            .await?,
+        _ => false,
+    };
+    Ok(exists)
+}
+
 /// Whether an ordinary projection write targets PMA-authoritative state.
 pub async fn projection_is_authoritative(
     pool: &PgPool,
@@ -423,13 +472,14 @@ pub async fn projection_is_authoritative(
     event: &Event,
     d_tag: &str,
 ) -> Result<bool> {
-    let kind = event.kind.as_u16() as u32;
-    let exists = match kind {
-        30177 => sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM managed_agent_heads WHERE community_id=$1 AND owner_pubkey=$2 AND agent_pubkey=$3)").bind(community.as_uuid()).bind(event.pubkey.to_bytes()).bind(hex::decode(d_tag).map_err(|_| invalid("invalid managed-agent d tag"))?).fetch_one(pool).await?,
-        30175 => sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM managed_agent_heads WHERE community_id=$1 AND owner_pubkey=$2 AND definition_d=$3)").bind(community.as_uuid()).bind(event.pubkey.to_bytes()).bind(d_tag).fetch_one(pool).await?,
-        _ => false,
-    };
-    Ok(exists)
+    projection_coordinate_is_authoritative(
+        pool,
+        community,
+        event.kind.as_u16() as u32,
+        &event.pubkey.to_bytes(),
+        d_tag,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -651,6 +701,143 @@ mod tests {
         let race_heads: i64 = sqlx::query_scalar("SELECT count(*) FROM managed_agent_heads WHERE community_id=$1 AND owner_pubkey=$2 AND agent_pubkey IN ($3,$4)")
             .bind(community.as_uuid()).bind(owner.public_key().to_bytes()).bind(race_agent_a.public_key().to_bytes()).bind(race_agent_b.public_key().to_bytes()).fetch_one(&pool).await.unwrap();
         assert_eq!(race_heads, 1);
+
+        // A generic instance ingest that starts before the first aggregate
+        // commits must lose after the aggregate binds the coordinate. Hold the
+        // aggregate on its definition lock after it has acquired the instance
+        // replacement lock, then start the generic writer behind it.
+        let ingest_race_agent = Keys::generate();
+        let ingest_race_d = ingest_race_agent.public_key().to_hex();
+        let ingest_race_definition = projection(&owner, 30175, "ingest-race-definition");
+        let expected_ingest_race_definition_id = ingest_race_definition.id.to_bytes();
+        let ingest_race_instance = projection(&owner, 30177, &ingest_race_d);
+        let expected_ingest_race_instance_id = ingest_race_instance.id.to_bytes();
+        let ingest_race_request = AggregateRequest {
+            private_event: private_head(&owner, &ingest_race_agent, 1, None, "active"),
+            definition_event: Some(ingest_race_definition),
+            instance_event: Some(ingest_race_instance.clone()),
+            expected_definition_revision: Some(1),
+        };
+        let definition_lock = super::super::event_replacement_lock_key(
+            community,
+            30175,
+            &owner.public_key().to_bytes(),
+            Some(b"ingest-race-definition"),
+        );
+        let instance_lock = super::super::event_replacement_lock_key(
+            community,
+            30177,
+            &owner.public_key().to_bytes(),
+            Some(ingest_race_d.as_bytes()),
+        );
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(definition_lock)
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+
+        let aggregate_pool = pool.clone();
+        let aggregate = tokio::spawn(async move {
+            commit_aggregate(&aggregate_pool, community, &ingest_race_request).await
+        });
+        let mut aggregate_has_instance_lock = false;
+        let mut probe = pool.acquire().await.unwrap();
+        for _ in 0..1_000 {
+            let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+                .bind(instance_lock)
+                .fetch_one(&mut *probe)
+                .await
+                .unwrap();
+            if acquired {
+                sqlx::query("SELECT pg_advisory_unlock($1)")
+                    .bind(instance_lock)
+                    .execute(&mut *probe)
+                    .await
+                    .unwrap();
+                tokio::task::yield_now().await;
+            } else {
+                aggregate_has_instance_lock = true;
+                break;
+            }
+        }
+        drop(probe);
+        assert!(
+            aggregate_has_instance_lock,
+            "aggregate never reached the instance replacement lock"
+        );
+
+        let generic_db = crate::Db::from_pool(pool.clone());
+        let generic_d = ingest_race_d.clone();
+        let generic = tokio::spawn(async move {
+            generic_db
+                .replace_parameterized_event(community, &ingest_race_instance, &generic_d, None)
+                .await
+        });
+        tokio::task::yield_now().await;
+        blocker.commit().await.unwrap();
+        assert!(aggregate.await.unwrap().is_ok());
+        assert!(matches!(
+            generic.await.unwrap(),
+            Err(DbError::ManagedAgentConflict(message))
+                if message.contains("projection is controlled")
+        ));
+        let live_instance: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM events WHERE community_id=$1 AND kind=30177 AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(owner.public_key().to_bytes())
+        .bind(&ingest_race_d)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(live_instance, expected_ingest_race_instance_id);
+
+        // Both legacy kind:5 mutation shapes are fenced at the DB boundary:
+        // a-tags delete by coordinate, while e-tags delete the resolved event ID.
+        for (kind, d_tag, event_id) in [
+            (
+                30175,
+                "ingest-race-definition",
+                expected_ingest_race_definition_id.as_slice(),
+            ),
+            (
+                30177,
+                ingest_race_d.as_str(),
+                expected_ingest_race_instance_id.as_slice(),
+            ),
+        ] {
+            assert!(
+                !crate::event::soft_delete_by_coordinate(
+                    &pool,
+                    community,
+                    kind,
+                    &owner.public_key().to_bytes(),
+                    d_tag,
+                    chrono::Utc::now().timestamp() + 60,
+                )
+                .await
+                .unwrap(),
+                "a-tag deletion must not retire PMA-bound kind {kind}"
+            );
+            assert!(
+                !crate::event::soft_delete_event_and_update_thread(
+                    &pool, community, event_id, None, None,
+                )
+                .await
+                .unwrap(),
+                "e-tag deletion must not retire PMA-bound kind {kind}"
+            );
+            let live: bool = sqlx::query_scalar(
+                "SELECT deleted_at IS NULL FROM events WHERE community_id=$1 AND id=$2",
+            )
+            .bind(community.as_uuid())
+            .bind(event_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(live, "PMA-bound kind {kind} must remain live");
+        }
 
         // Deletion advances the same private CAS chain, returns no public
         // bindings, and retires the instance projection. Neither a stale
