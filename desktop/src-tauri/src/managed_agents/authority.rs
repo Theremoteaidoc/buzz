@@ -103,6 +103,49 @@ impl RelayAuthority {
     }
 }
 
+/// Current version of the `backend` field's encrypted-payload representation.
+///
+/// [`BackendKind`](super::types::BackendKind) is `PrivateCanonical`: it is
+/// carried byte-exact into the kind:30179 payload and diffed at verification.
+/// Its serde shape (`{"type":"provider","id":…,"config":…}`) is therefore a
+/// wire contract — a future variant rename or field change would make an old
+/// device's stored value mismatch a new device's re-encode and block migration
+/// with no diagnostic. Wrapping it in a versioned envelope makes the shape
+/// explicit and lets the migration codec reject/upgrade an unknown version
+/// deterministically instead of silently mis-diffing.
+pub const BACKEND_PAYLOAD_VERSION: u64 = 1;
+
+/// Versioned envelope for the `backend` field inside the kind:30179 payload.
+///
+/// Serializes as `{"version":1,"backend":{…BackendKind…}}`. The migration codec
+/// carries + verifies this envelope, not a bare `BackendKind`, so a shape
+/// change bumps `version` and is caught explicitly rather than surfacing as an
+/// opaque byte mismatch.
+///
+/// Foundation type — the migration payload codec (sibling lane) is the
+/// consumer; only this module's tests exercise it today.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct VersionedBackend {
+    /// Payload schema version. Migration rejects an envelope whose version it
+    /// does not understand rather than mis-diffing an unexpected shape.
+    pub version: u64,
+    /// The carried backend configuration at that version.
+    pub backend: super::types::BackendKind,
+}
+
+#[allow(dead_code)]
+impl VersionedBackend {
+    /// Wrap a backend in the current payload envelope.
+    pub fn current(backend: super::types::BackendKind) -> Self {
+        Self {
+            version: BACKEND_PAYLOAD_VERSION,
+            backend,
+        }
+    }
+}
+
 /// How a durable [`ManagedAgentRecord`](super::types::ManagedAgentRecord) field
 /// relates to the relay kind:30179 aggregate during migration.
 ///
@@ -178,7 +221,6 @@ pub(crate) const FIELD_CLASSIFICATIONS: &[(&str, FieldClass)] = {
         // --- Identity + private canonical config (encrypted kind:30179) ---
         ("pubkey", PrivateCanonical), // the d-tag coordinate itself
         ("private_key_nsec", PrivateCanonical),
-        ("auth_tag", PrivateCanonical),
         ("relay_url", PrivateCanonical),
         ("agent_command_override", PrivateCanonical),
         ("agent_args", PrivateCanonical),
@@ -218,12 +260,20 @@ pub(crate) const FIELD_CLASSIFICATIONS: &[(&str, FieldClass)] = {
         ("parallelism", InstanceProjected),
         ("respond_to", InstanceProjected),
         ("respond_to_allowlist", InstanceProjected),
-        // --- Deprecated / re-derived at spawn: carry NOT, diff NOT ---
+        // --- Deprecated / re-derived at spawn or migration: carry NOT, diff NOT ---
         ("acp_command", DerivedNotCarried),
         ("agent_command", DerivedNotCarried),
         ("mcp_command", DerivedNotCarried),
         ("turn_timeout_seconds", DerivedNotCarried),
         ("shared", DerivedNotCarried), // legacy, `skip_serializing`
+        // NIP-OA owner->agent authorization tag. Deterministically COMPUTED
+        // from the owner keys + agent pubkey (compute_auth_tag), never a
+        // free-standing secret. Migration MUST RE-MINT it (owner re-signs a
+        // fresh owner->agent tag for the canonical record), never preserve or
+        // trust the stored string — a re-mint would not byte-match the stored
+        // value, so carrying + diffing it would false-positive and block
+        // migration forever. Hence DerivedNotCarried, not PrivateCanonical.
+        ("auth_tag", DerivedNotCarried),
         // --- Bookkeeping timestamps carried for audit but not conflict-resolving ---
         ("created_at", InstanceProjected),
         ("updated_at", InstanceProjected),
@@ -250,6 +300,128 @@ pub(crate) const FIELD_CLASSIFICATIONS: &[(&str, FieldClass)] = {
         ("relay_authority", AuthorityBookkeeping),
     ]
 };
+
+/// Maximum NIP-44 v2 plaintext size for the encrypted kind:30179 payload, in
+/// bytes. A serialized migration payload larger than this cannot be locked, so
+/// the agent stays [`RelayAuthority::LegacyOnly`]. Mirrors
+/// `buzz_core_pkg::engram::NIP44_PLAINTEXT_MAX` (65_535); duplicated as a local
+/// constant so the taxonomy is self-describing and unit-testable without the
+/// crypto dependency.
+pub const MIGRATION_PAYLOAD_MAX_BYTES: usize = 65_535;
+
+/// Maximum size, in bytes, of a single serialized `Value` the private
+/// managed-agent codec accepts (each extension / recovery / config entry the
+/// payload builder inserts). This is the per-`Value` cap the codec enforces —
+/// it is NOT an OS-keyring limit and NOT a combined recovery blob. Any single
+/// codec value larger than this keeps the agent
+/// [`RelayAuthority::LegacyOnly`]. Tracks the relay-side
+/// `private_managed_agent::MAX_VALUE_BYTES` (32_768); duplicated locally until
+/// the shared codec crate is a dependency of Desktop.
+pub const MIGRATION_MAX_VALUE_BYTES: usize = 32_768;
+
+/// The exact versioned NIP-11 capability token a relay must advertise before an
+/// agent may migrate. The relay deliberately advertises *aggregate* semantics
+/// (that it will maintain the kind:30179 aggregate and serve a readable head),
+/// not mere kind acceptance — so gating checks for this precise token, never a
+/// generic "accepts the kind" boolean.
+pub const NIP_PMA_AGGREGATE_TOKEN: &str = "nip-pma-aggregate-v1";
+
+/// A terminal reason an agent cannot migrate to relay-canonical authority on
+/// the current attempt and MUST remain [`RelayAuthority::LegacyOnly`].
+///
+/// This is the *decision*, not the storage: it is the value
+/// [`assess_migration_readiness`] returns so the migration driver can stop and
+/// record why. Persisting it durably is the job of the migration record/state
+/// in the driver lane (which owns the store); the `LegacyOnly` variant here
+/// deliberately carries no reason, so this type makes no persistence claim it
+/// cannot back.
+///
+/// Each variant is *terminal* for the current attempt: migration stops and
+/// NEVER drives a retry-loop — retrying an oversize value or a relay that
+/// lacks the capability just burns cycles and spams the relay. Migration is
+/// re-attempted only when the underlying input changes (a value shrinks, the
+/// relay begins advertising the capability), which is an external event, not a
+/// timer.
+///
+/// Foundation type — the migration driver (sibling lane) is the consumer;
+/// today only this module's tests exercise it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum MigrationBlock {
+    /// The serialized encrypted payload exceeds [`MIGRATION_PAYLOAD_MAX_BYTES`].
+    PayloadTooLarge { bytes: usize },
+    /// A single serialized codec `Value` (extension / recovery / config entry)
+    /// exceeds [`MIGRATION_MAX_VALUE_BYTES`].
+    CodecValueTooLarge { bytes: usize },
+    /// The relay's NIP-11 document does not advertise the exact
+    /// [`NIP_PMA_AGGREGATE_TOKEN`] aggregate capability, so a published head
+    /// could never be maintained and read back to verify. Stay legacy until the
+    /// relay advertises it.
+    RelayCapabilityAbsent,
+}
+
+impl MigrationBlock {
+    /// A self-describing reason string the migration driver can surface or log
+    /// when it stops. This is a diagnostic rendering of the decision, not a
+    /// persistence mechanism — the variant itself is the signal.
+    #[allow(dead_code)]
+    pub fn reason(&self) -> String {
+        match self {
+            Self::PayloadTooLarge { bytes } => format!(
+                "migration payload is {bytes} bytes; exceeds the \
+                 {MIGRATION_PAYLOAD_MAX_BYTES}-byte encrypted limit"
+            ),
+            Self::CodecValueTooLarge { bytes } => format!(
+                "a migration codec value is {bytes} bytes; exceeds the \
+                 {MIGRATION_MAX_VALUE_BYTES}-byte per-value limit"
+            ),
+            Self::RelayCapabilityAbsent => format!(
+                "relay does not advertise the {NIP_PMA_AGGREGATE_TOKEN} \
+                 aggregate capability (NIP-11)"
+            ),
+        }
+    }
+}
+
+/// Pure readiness gate: decide whether an agent MAY migrate given the concrete
+/// encrypted-payload size, the largest single codec `Value` size, and the set
+/// of NIP-11 capability tokens the target relay advertises.
+///
+/// Returns `Ok(())` only when every terminal condition is clear. On any
+/// [`MigrationBlock`] the caller MUST keep the agent
+/// [`RelayAuthority::LegacyOnly`] and NOT retry until an input changes. Size
+/// boundaries are inclusive-safe: exactly-at-limit is allowed; strictly-over is
+/// blocked. Capability is checked FIRST — a relay that cannot maintain the
+/// aggregate can never verify a head, so size checks would be moot.
+///
+/// Foundation function — the migration driver (sibling lane) is the consumer.
+#[allow(dead_code)]
+pub fn assess_migration_readiness<'a, I>(
+    payload_bytes: usize,
+    max_codec_value_bytes: usize,
+    advertised_nip11_tokens: I,
+) -> Result<(), MigrationBlock>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let relay_supports_aggregate = advertised_nip11_tokens
+        .into_iter()
+        .any(|token| token == NIP_PMA_AGGREGATE_TOKEN);
+    if !relay_supports_aggregate {
+        return Err(MigrationBlock::RelayCapabilityAbsent);
+    }
+    if payload_bytes > MIGRATION_PAYLOAD_MAX_BYTES {
+        return Err(MigrationBlock::PayloadTooLarge {
+            bytes: payload_bytes,
+        });
+    }
+    if max_codec_value_bytes > MIGRATION_MAX_VALUE_BYTES {
+        return Err(MigrationBlock::CodecValueTooLarge {
+            bytes: max_codec_value_bytes,
+        });
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests;

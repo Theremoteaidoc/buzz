@@ -146,16 +146,174 @@ fn field_classification_is_exhaustive() {
 }
 
 #[test]
+fn versioned_backend_roundtrips_with_stable_shape() {
+    use super::{VersionedBackend, BACKEND_PAYLOAD_VERSION};
+
+    // Provider variant — carries id + opaque config.
+    let backend = BackendKind::Provider {
+        id: "buzz-backend-x".to_string(),
+        config: serde_json::json!({ "api_key": "secret", "region": "us" }),
+    };
+    let envelope = VersionedBackend::current(backend.clone());
+    let json = serde_json::to_value(&envelope).unwrap();
+
+    // EXACT persisted shape: a version marker beside the backend body, so a
+    // future BackendKind shape change bumps `version` and is caught explicitly.
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "version": BACKEND_PAYLOAD_VERSION,
+            "backend": {
+                "type": "provider",
+                "id": "buzz-backend-x",
+                "config": { "api_key": "secret", "region": "us" },
+            },
+        }),
+    );
+
+    let back: VersionedBackend = serde_json::from_value(json).unwrap();
+    assert_eq!(back, envelope);
+    assert_eq!(back.version, 1);
+
+    // Local variant — the internally-tagged unit shape.
+    let local = VersionedBackend::current(BackendKind::Local);
+    let local_json = serde_json::to_value(&local).unwrap();
+    assert_eq!(
+        local_json,
+        serde_json::json!({ "version": 1, "backend": { "type": "local" } }),
+    );
+    assert_eq!(
+        serde_json::from_value::<VersionedBackend>(local_json).unwrap(),
+        local,
+    );
+}
+
+#[test]
+fn versioned_backend_rejects_unknown_envelope_fields() {
+    // `deny_unknown_fields`: an envelope with an unexpected sibling key fails to
+    // deserialize rather than silently dropping data the migration codec relies
+    // on. (BackendKind's own `config` stays opaque; this guards the envelope.)
+    let bad = serde_json::json!({
+        "version": 1,
+        "backend": { "type": "local" },
+        "unexpected": true,
+    });
+    assert!(
+        serde_json::from_value::<super::VersionedBackend>(bad).is_err(),
+        "versioned backend envelope must reject unknown top-level fields",
+    );
+}
+
+#[test]
+fn migration_readiness_allows_clear_case() {
+    use super::{
+        assess_migration_readiness, MIGRATION_MAX_VALUE_BYTES, MIGRATION_PAYLOAD_MAX_BYTES,
+        NIP_PMA_AGGREGATE_TOKEN,
+    };
+    // Exactly at both limits, relay advertises the aggregate token -> allowed
+    // (inclusive boundary).
+    assert!(assess_migration_readiness(
+        MIGRATION_PAYLOAD_MAX_BYTES,
+        MIGRATION_MAX_VALUE_BYTES,
+        [NIP_PMA_AGGREGATE_TOKEN],
+    )
+    .is_ok());
+    // Comfortably under; extra unrelated tokens are ignored.
+    assert!(assess_migration_readiness(1024, 512, ["other", NIP_PMA_AGGREGATE_TOKEN]).is_ok());
+}
+
+#[test]
+fn migration_readiness_blocks_oversize_payload() {
+    use super::{
+        assess_migration_readiness, MigrationBlock, MIGRATION_PAYLOAD_MAX_BYTES,
+        NIP_PMA_AGGREGATE_TOKEN,
+    };
+    let over = MIGRATION_PAYLOAD_MAX_BYTES + 1;
+    assert_eq!(
+        assess_migration_readiness(over, 0, [NIP_PMA_AGGREGATE_TOKEN]),
+        Err(MigrationBlock::PayloadTooLarge { bytes: over }),
+    );
+}
+
+#[test]
+fn migration_readiness_blocks_oversize_codec_value() {
+    use super::{
+        assess_migration_readiness, MigrationBlock, MIGRATION_MAX_VALUE_BYTES,
+        NIP_PMA_AGGREGATE_TOKEN,
+    };
+    let over = MIGRATION_MAX_VALUE_BYTES + 1;
+    assert_eq!(
+        assess_migration_readiness(0, over, [NIP_PMA_AGGREGATE_TOKEN]),
+        Err(MigrationBlock::CodecValueTooLarge { bytes: over }),
+    );
+}
+
+#[test]
+fn migration_readiness_blocks_when_relay_lacks_capability() {
+    use super::{assess_migration_readiness, MigrationBlock, NIP_PMA_AGGREGATE_TOKEN};
+    // Capability absence is checked FIRST: even a valid-size payload cannot
+    // migrate to a relay that does not advertise the aggregate token. Stay legacy.
+    assert_eq!(
+        assess_migration_readiness(0, 0, []),
+        Err(MigrationBlock::RelayCapabilityAbsent),
+    );
+    // A relay advertising only unrelated tokens is still not capable — mere
+    // kind acceptance is not the aggregate semantics we require.
+    assert_eq!(
+        assess_migration_readiness(0, 0, ["nip-pma-aggregate-v0", "other"]),
+        Err(MigrationBlock::RelayCapabilityAbsent),
+    );
+    // And it dominates a simultaneous oversize condition (no misleading reason).
+    assert_eq!(
+        assess_migration_readiness(usize::MAX, usize::MAX, []),
+        Err(MigrationBlock::RelayCapabilityAbsent),
+    );
+    // Sanity: the exact token, alone, does not itself block.
+    assert!(assess_migration_readiness(0, 0, [NIP_PMA_AGGREGATE_TOKEN]).is_ok());
+}
+
+#[test]
+fn migration_block_reasons_are_self_describing() {
+    use super::MigrationBlock;
+    // Each block yields a non-empty, self-describing diagnostic string. This is
+    // a rendering of the decision for logging/surfacing — the variant itself is
+    // the signal; persistence is owned by the migration driver lane.
+    for block in [
+        MigrationBlock::PayloadTooLarge { bytes: 70_000 },
+        MigrationBlock::CodecValueTooLarge { bytes: 40_000 },
+        MigrationBlock::RelayCapabilityAbsent,
+    ] {
+        assert!(!block.reason().is_empty());
+    }
+    assert!(MigrationBlock::PayloadTooLarge { bytes: 70_000 }
+        .reason()
+        .contains("70000"));
+}
+
+#[test]
 fn no_secret_field_is_projected_publicly() {
     // Secrets must never ride a PUBLIC projection (kind:30175/30177). Any field
     // holding credential material must be PrivateCanonical.
-    for secret in ["private_key_nsec", "auth_tag", "env_vars", "backend"] {
+    for secret in ["private_key_nsec", "env_vars", "backend"] {
         assert_eq!(
             classify_field(secret),
             Some(FieldClass::PrivateCanonical),
             "secret-bearing field `{secret}` must be PrivateCanonical, never projected publicly",
         );
     }
+}
+
+#[test]
+fn auth_tag_is_re_minted_not_carried() {
+    // The NIP-OA owner->agent tag is deterministically re-mintable from owner
+    // keys + agent pubkey. Migration re-mints it; it is NOT carried or diffed,
+    // so a re-mint that differs byte-for-byte cannot block migration. It must
+    // never ride a public projection either.
+    assert_eq!(
+        classify_field("auth_tag"),
+        Some(FieldClass::DerivedNotCarried),
+        "auth_tag must be DerivedNotCarried (re-minted at migration, never preserved/diffed)",
+    );
 }
 
 #[test]
