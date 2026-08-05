@@ -160,6 +160,37 @@ fn missing_record_is_never_tombstoned() {
 }
 
 #[test]
+fn relay_authoritative_record_is_never_republished_by_legacy_boot_reconcile() {
+    let dir = TempDir::new().unwrap();
+    let keys = nostr::Keys::generate();
+    let pubkey = "9".repeat(64);
+    let mut record = sample_record(&pubkey, "relay-authoritative-agent");
+    record.relay_authority = crate::managed_agents::RelayAuthority::relay_authoritative(
+        crate::managed_agents::authority::RelayAuthorityEvidence {
+            generation: 7,
+            private_event_id: "a".repeat(64),
+        },
+    );
+    write_store(&dir, &[record]);
+
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 0);
+
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+    assert!(get_pending_sync(&conn).unwrap().is_empty());
+    assert!(
+        get_retained_event(
+            &conn,
+            KIND_MANAGED_AGENT,
+            &keys.public_key().to_hex(),
+            &pubkey,
+        )
+        .unwrap()
+        .is_none(),
+        "legacy reconcile must not synthesize a 30177 from an authoritative cache"
+    );
+}
+
+#[test]
 fn keyless_record_is_skipped() {
     let dir = TempDir::new().unwrap();
     let keys = nostr::Keys::generate();
