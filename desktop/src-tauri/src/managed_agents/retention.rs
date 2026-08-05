@@ -106,6 +106,201 @@ pub fn arrival_retention_scope(
     ))
 }
 
+/// One durable kind:30179 aggregate request retained for offline retry.
+///
+/// The exact serialized request is immutable for a generation: retrying must
+/// submit the same signed events and CAS predecessor, never rebuild them with a
+/// fresh timestamp after local state has moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Consumed by the PMA aggregate submit/retry driver in the next slice.
+pub struct RetainedManagedAgentAggregate {
+    pub owner_pubkey: String,
+    pub agent_pubkey: String,
+    pub generation: u64,
+    pub private_event_id: String,
+    pub state: String,
+    pub request_json: String,
+    pub pending_sync: bool,
+    pub last_error: Option<String>,
+}
+
+/// Insert or idempotently refresh a retained aggregate generation.
+///
+/// Generation may advance by exactly one. A byte-identical rewrite of the
+/// current generation is accepted for crash recovery; divergent same-generation
+/// content and skipped/stale generations are rejected before touching disk.
+#[allow(dead_code)] // Consumed by the PMA aggregate submit/retry driver in the next slice.
+pub fn retain_managed_agent_aggregate(
+    conn: &mut Connection,
+    aggregate: &RetainedManagedAgentAggregate,
+) -> Result<(), String> {
+    if aggregate.generation == 0 || aggregate.generation > i64::MAX as u64 {
+        return Err("managed-agent aggregate generation is out of range".to_string());
+    }
+    if !matches!(aggregate.state.as_str(), "active" | "deleted") {
+        return Err("managed-agent aggregate state must be active or deleted".to_string());
+    }
+
+    if !aggregate.pending_sync || aggregate.last_error.is_some() {
+        return Err("new managed-agent aggregate must start pending without an error".to_string());
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("failed to retain managed-agent aggregate: {e}"))?;
+    let current = tx
+        .query_row(
+            "SELECT generation, private_event_id, state, request_json
+               FROM managed_agent_aggregates
+              WHERE owner_pubkey = ?1 AND agent_pubkey = ?2
+              ORDER BY generation DESC
+              LIMIT 1",
+            params![aggregate.owner_pubkey, aggregate.agent_pubkey],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("failed to read retained managed-agent aggregate: {e}"))?;
+
+    if let Some((generation, event_id, state, request_json)) = current {
+        let generation = u64::try_from(generation)
+            .map_err(|_| "retained managed-agent aggregate generation is invalid".to_string())?;
+        if aggregate.generation == generation {
+            if aggregate.private_event_id != event_id
+                || aggregate.state != state
+                || aggregate.request_json != request_json
+            {
+                return Err(
+                    "managed-agent aggregate conflicts with retained generation".to_string()
+                );
+            }
+            // An exact retry is a true no-op. Do not re-arm an already
+            // confirmed row or erase its persisted diagnostic on startup.
+            return Ok(());
+        }
+
+        let next_generation = generation.checked_add(1).ok_or_else(|| {
+            "retained managed-agent aggregate generation cannot advance".to_string()
+        })?;
+        if aggregate.generation != next_generation {
+            return Err(format!(
+                "managed-agent aggregate generation must advance from {generation} to {next_generation}"
+            ));
+        }
+    } else if aggregate.generation != 1 {
+        return Err("first retained managed-agent aggregate must be generation 1".to_string());
+    }
+
+    tx.execute(
+        "INSERT INTO managed_agent_aggregates
+            (owner_pubkey, agent_pubkey, generation, private_event_id, state,
+             request_json, pending_sync, last_error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, NULL)",
+        params![
+            aggregate.owner_pubkey,
+            aggregate.agent_pubkey,
+            aggregate.generation as i64,
+            aggregate.private_event_id,
+            aggregate.state,
+            aggregate.request_json,
+        ],
+    )
+    .map_err(|e| format!("failed to write retained managed-agent aggregate: {e}"))?;
+    tx.commit()
+        .map_err(|e| format!("failed to commit retained managed-agent aggregate: {e}"))
+}
+
+#[allow(dead_code)] // Consumed by the PMA aggregate submit/retry driver in the next slice.
+pub fn get_retained_managed_agent_aggregate(
+    conn: &Connection,
+    owner_pubkey: &str,
+    agent_pubkey: &str,
+) -> Result<Option<RetainedManagedAgentAggregate>, String> {
+    conn.query_row(
+        "SELECT owner_pubkey, agent_pubkey, generation, private_event_id, state,
+                request_json, pending_sync, last_error
+           FROM managed_agent_aggregates
+          WHERE owner_pubkey = ?1 AND agent_pubkey = ?2
+          ORDER BY generation DESC
+          LIMIT 1",
+        params![owner_pubkey, agent_pubkey],
+        |row| {
+            Ok(RetainedManagedAgentAggregate {
+                owner_pubkey: row.get(0)?,
+                agent_pubkey: row.get(1)?,
+                generation: row.get::<_, i64>(2)? as u64,
+                private_event_id: row.get(3)?,
+                state: row.get(4)?,
+                request_json: row.get(5)?,
+                pending_sync: row.get::<_, i32>(6)? != 0,
+                last_error: row.get(7)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| format!("failed to get retained managed-agent aggregate: {e}"))
+}
+
+/// Mark one exact retained aggregate request as confirmed by relay read-back.
+#[allow(dead_code)] // Consumed by the PMA aggregate submit/retry driver in the next slice.
+pub fn mark_managed_agent_aggregate_synced(
+    conn: &Connection,
+    owner_pubkey: &str,
+    agent_pubkey: &str,
+    generation: u64,
+    private_event_id: &str,
+) -> Result<bool, String> {
+    let changed = conn
+        .execute(
+            "UPDATE managed_agent_aggregates
+                SET pending_sync = 0, last_error = NULL
+              WHERE owner_pubkey = ?1 AND agent_pubkey = ?2
+                AND generation = ?3 AND private_event_id = ?4",
+            params![
+                owner_pubkey,
+                agent_pubkey,
+                generation as i64,
+                private_event_id
+            ],
+        )
+        .map_err(|e| format!("failed to mark managed-agent aggregate synced: {e}"))?;
+    Ok(changed == 1)
+}
+
+/// Persist a diagnostic for one exact retained attempt without clearing retry.
+#[allow(dead_code)] // Consumed by the PMA aggregate submit/retry driver in the next slice.
+pub fn record_managed_agent_aggregate_error(
+    conn: &Connection,
+    owner_pubkey: &str,
+    agent_pubkey: &str,
+    generation: u64,
+    private_event_id: &str,
+    error: &str,
+) -> Result<bool, String> {
+    let changed = conn
+        .execute(
+            "UPDATE managed_agent_aggregates
+                SET last_error = ?5, pending_sync = 1
+              WHERE owner_pubkey = ?1 AND agent_pubkey = ?2
+                AND generation = ?3 AND private_event_id = ?4",
+            params![
+                owner_pubkey,
+                agent_pubkey,
+                generation as i64,
+                private_event_id,
+                error
+            ],
+        )
+        .map_err(|e| format!("failed to record managed-agent aggregate error: {e}"))?;
+    Ok(changed == 1)
+}
+
 /// A retained persona event row.
 #[derive(Debug, Clone)]
 pub struct RetainedEvent {
@@ -140,6 +335,17 @@ pub fn open_retention_db(path: &Path) -> Result<Connection, String> {
             raw_event TEXT NOT NULL,
             pending_sync INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (kind, pubkey, d_tag)
+        );
+        CREATE TABLE IF NOT EXISTS managed_agent_aggregates (
+            owner_pubkey TEXT NOT NULL,
+            agent_pubkey TEXT NOT NULL,
+            generation INTEGER NOT NULL CHECK (generation > 0),
+            private_event_id TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('active', 'deleted')),
+            request_json TEXT NOT NULL,
+            pending_sync INTEGER NOT NULL DEFAULT 1,
+            last_error TEXT,
+            PRIMARY KEY (owner_pubkey, agent_pubkey, generation)
         );",
     )
     .map_err(|e| format!("failed to create retention table: {e}"))?;
@@ -551,6 +757,136 @@ mod tests {
             raw_event: r#"{"id":"..."}"#.to_string(),
             pending_sync: true,
         }
+    }
+
+    fn aggregate(
+        generation: u64,
+        event_id: &str,
+        state: &str,
+        request_json: &str,
+    ) -> RetainedManagedAgentAggregate {
+        RetainedManagedAgentAggregate {
+            owner_pubkey: "owner".to_string(),
+            agent_pubkey: "agent".to_string(),
+            generation,
+            private_event_id: event_id.to_string(),
+            state: state.to_string(),
+            request_json: request_json.to_string(),
+            pending_sync: true,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn aggregate_retention_enforces_contiguous_immutable_generations() {
+        let mut conn = test_db();
+        let first = aggregate(1, "event-1", "active", r#"{"generation":1}"#);
+        retain_managed_agent_aggregate(&mut conn, &first).unwrap();
+        retain_managed_agent_aggregate(&mut conn, &first).unwrap();
+
+        let conflicting = aggregate(1, "other", "active", r#"{"generation":1}"#);
+        assert!(retain_managed_agent_aggregate(&mut conn, &conflicting)
+            .unwrap_err()
+            .contains("conflicts"));
+        let skipped = aggregate(3, "event-3", "deleted", r#"{"generation":3}"#);
+        assert!(retain_managed_agent_aggregate(&mut conn, &skipped)
+            .unwrap_err()
+            .contains("advance from 1 to 2"));
+
+        let tombstone = aggregate(2, "event-2", "deleted", r#"{"generation":2}"#);
+        retain_managed_agent_aggregate(&mut conn, &tombstone).unwrap();
+        assert_eq!(
+            get_retained_managed_agent_aggregate(&conn, "owner", "agent").unwrap(),
+            Some(tombstone)
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM managed_agent_aggregates
+                  WHERE owner_pubkey = 'owner' AND agent_pubkey = 'agent'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn aggregate_compare_and_clear_cannot_ack_a_newer_attempt() {
+        let mut conn = test_db();
+        retain_managed_agent_aggregate(
+            &mut conn,
+            &aggregate(1, "event-1", "active", r#"{"generation":1}"#),
+        )
+        .unwrap();
+        retain_managed_agent_aggregate(
+            &mut conn,
+            &aggregate(2, "event-2", "deleted", r#"{"generation":2}"#),
+        )
+        .unwrap();
+
+        assert!(
+            mark_managed_agent_aggregate_synced(&conn, "owner", "agent", 1, "event-1").unwrap()
+        );
+        // A stale success can clear its own retained attempt, but cannot clear
+        // or otherwise acknowledge the newer tombstone.
+        assert!(
+            get_retained_managed_agent_aggregate(&conn, "owner", "agent")
+                .unwrap()
+                .unwrap()
+                .pending_sync
+        );
+        assert!(
+            mark_managed_agent_aggregate_synced(&conn, "owner", "agent", 2, "event-2").unwrap()
+        );
+        assert!(
+            !get_retained_managed_agent_aggregate(&conn, "owner", "agent")
+                .unwrap()
+                .unwrap()
+                .pending_sync
+        );
+
+        // Rebuilding the exact same generation during startup must not turn a
+        // confirmed row back into pending work.
+        retain_managed_agent_aggregate(
+            &mut conn,
+            &aggregate(2, "event-2", "deleted", r#"{"generation":2}"#),
+        )
+        .unwrap();
+        assert!(
+            !get_retained_managed_agent_aggregate(&conn, "owner", "agent")
+                .unwrap()
+                .unwrap()
+                .pending_sync
+        );
+    }
+
+    #[test]
+    fn aggregate_error_is_scoped_to_the_exact_attempt() {
+        let mut conn = test_db();
+        retain_managed_agent_aggregate(
+            &mut conn,
+            &aggregate(1, "event-1", "active", r#"{"generation":1}"#),
+        )
+        .unwrap();
+        assert!(
+            !record_managed_agent_aggregate_error(&conn, "owner", "agent", 1, "wrong", "nope")
+                .unwrap()
+        );
+        assert!(record_managed_agent_aggregate_error(
+            &conn,
+            "owner",
+            "agent",
+            1,
+            "event-1",
+            "relay unavailable"
+        )
+        .unwrap());
+        let row = get_retained_managed_agent_aggregate(&conn, "owner", "agent")
+            .unwrap()
+            .unwrap();
+        assert!(row.pending_sync);
+        assert_eq!(row.last_error.as_deref(), Some("relay unavailable"));
     }
 
     #[test]
