@@ -42,9 +42,10 @@
 //! while every teammate is created owner-only (see
 //! `welcomeTeammateHasExpectedAccess` in
 //! `desktop/src/features/onboarding/welcomeGuide.ts`). Read every use of
-//! "owner-only" in this module as `owner ∪ verified same-owner agents`. Buzz's
-//! own user-facing copy for the setting is narrower than that, which is a copy
-//! question tracked outside this module, not a difference in enforcement.
+//! "owner-only" in this module as `owner ∪ verified same-owner agents`. The
+//! setting's own copy says so: the line under Only me reads "Only you and your
+//! agents can send instructions." (`RespondToField.tsx`). The dropdown label
+//! stays "Only me", which is the audience the user picks.
 
 use super::{validate_respond_to_allowlist, ManagedAgentRecord, RespondTo};
 
