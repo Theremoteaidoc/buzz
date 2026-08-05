@@ -301,7 +301,13 @@ async fn submit_to_relay(
         .map_err(|e| crate::relay::classify_request_error(&e))?;
 
     if !response.status().is_success() {
-        return Err(crate::relay::relay_error_message(response).await);
+        let status = response.status();
+        let message = crate::relay::relay_error_message(response).await;
+        return Err(if status == reqwest::StatusCode::CONFLICT {
+            format!("conflict: {message}")
+        } else {
+            message
+        });
     }
 
     crate::relay::parse_json_response::<AggregateResponse>(response).await

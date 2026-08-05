@@ -131,6 +131,31 @@ pub struct RetainedManagedAgentAggregate {
     pub local_authority_applied: bool,
 }
 
+pub fn seed_confirmed_managed_agent_aggregate(
+    conn: &Connection,
+    aggregate: &RetainedManagedAgentAggregate,
+) -> Result<(), String> {
+    if aggregate.pending_sync || aggregate.state != "active" {
+        return Err("confirmed managed-agent seed must be a synced active head".to_string());
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO managed_agent_aggregates
+            (owner_pubkey, agent_pubkey, generation, private_event_id, state,
+             request_json, pending_sync, last_error, local_authority_applied)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, 0)",
+        params![
+            aggregate.owner_pubkey,
+            aggregate.agent_pubkey,
+            aggregate.generation as i64,
+            aggregate.private_event_id,
+            aggregate.state,
+            aggregate.request_json,
+        ],
+    )
+    .map_err(|error| format!("failed to seed confirmed managed-agent aggregate: {error}"))?;
+    Ok(())
+}
+
 /// Insert or idempotently refresh a retained aggregate generation.
 ///
 /// Generation may advance by exactly one. A byte-identical rewrite of the

@@ -41,6 +41,16 @@ pub(in crate::commands) fn retain_persona_pending(
     state: &AppState,
     persona: &AgentDefinition,
 ) {
+    if crate::managed_agents::load_managed_agents(app)
+        .unwrap_or_default()
+        .iter()
+        .any(|record| {
+            record.persona_id.as_deref() == Some(persona.id.as_str())
+                && record.relay_authority.is_relay_authoritative()
+        })
+    {
+        return;
+    }
     if let Err(e) = prepare_persona_publication(app, state, persona, None) {
         eprintln!("buzz-desktop: persona-retain: {e}");
     }

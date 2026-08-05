@@ -246,8 +246,36 @@ fn reconcile_inbound_private_managed_agent(
         }
         State::Active => {
             let reconstructed = reconstruct_managed_agent_from_payload(&payload, event)?;
+            let request_json = serde_json::to_string(&serde_json::json!({
+                "private_event": event,
+                "definition_event": payload.active.as_ref().map(|active| &active.definition.recovery.signed_event),
+                "instance_event": payload.active.as_ref().map(|active| &active.instance_projection.recovery.signed_event),
+                "expected_definition_revision": payload.active.as_ref().map(|active| active.definition.revision),
+            }))
+            .map_err(|error| format!("failed to retain inbound private aggregate: {error}"))?;
+            let scope = crate::managed_agents::retention::arrival_retention_scope(
+                app,
+                state,
+                arrival_relay_url,
+            )?
+            .ok_or_else(|| "private aggregate arrival scope changed".to_string())?;
+            let conn = crate::managed_agents::retention::open_retention_db(&scope.db_path)?;
+            crate::managed_agents::retention::seed_confirmed_managed_agent_aggregate(
+                &conn,
+                &crate::managed_agents::retention::RetainedManagedAgentAggregate {
+                    owner_pubkey: payload.owner_pubkey.clone(),
+                    agent_pubkey: payload.agent_pubkey.clone(),
+                    generation: payload.generation,
+                    private_event_id: event.id.to_hex(),
+                    state: "active".to_string(),
+                    request_json,
+                    pending_sync: false,
+                    last_error: None,
+                    local_authority_applied: false,
+                },
+            )?;
             match existing_index {
-                Some(index) => agents[index] = reconstructed,
+                Some(index) => merge_reconstructed_managed_agent(&mut agents[index], reconstructed),
                 None => agents.push(reconstructed),
             }
             crate::managed_agents::save_managed_agents(app, &agents)?;
@@ -257,6 +285,31 @@ fn reconcile_inbound_private_managed_agent(
     try_regenerate_nest(app);
     let _ = app.emit("agents-data-changed", ());
     Ok(())
+}
+
+fn merge_reconstructed_managed_agent(
+    local: &mut ManagedAgentRecord,
+    inbound: ManagedAgentRecord,
+) {
+    let start_on_app_launch = local.start_on_app_launch;
+    let auto_restart = local.auto_restart_on_config_change;
+    let provider_binary_path = local.provider_binary_path.clone();
+    let runtime_pid = local.runtime_pid;
+    let last_started_at = local.last_started_at.clone();
+    let last_stopped_at = local.last_stopped_at.clone();
+    let last_exit_code = local.last_exit_code;
+    let last_error = local.last_error.clone();
+    let last_error_code = local.last_error_code;
+    *local = inbound;
+    local.start_on_app_launch = start_on_app_launch;
+    local.auto_restart_on_config_change = auto_restart;
+    local.provider_binary_path = provider_binary_path;
+    local.runtime_pid = runtime_pid;
+    local.last_started_at = last_started_at;
+    local.last_stopped_at = last_stopped_at;
+    local.last_exit_code = last_exit_code;
+    local.last_error = last_error;
+    local.last_error_code = last_error_code;
 }
 
 pub(crate) fn reconstruct_managed_agent_from_payload(

@@ -930,17 +930,40 @@ pub async fn update_managed_agent(
             {
                 Ok(verified) => verified,
                 Err(sync_error) => {
-                    let rollback = rollback.as_ref().ok_or_else(|| {
-                        "missing local rollback state after authoritative relay failure".to_string()
-                    })?;
-                    rollback_failed_agent_update(
-                        &app,
-                        &state,
-                        &summary.pubkey,
-                        rollback.clone(),
-                    )?;
+                    if sync_error.starts_with("conflict:") {
+                        let pending = crate::managed_agents::retention::get_retained_managed_agent_aggregate(
+                            &crate::managed_agents::retention::open_retention_db(&scope.db_path)?,
+                            &scope.owner_keys.public_key().to_hex(),
+                            &summary.pubkey,
+                        )?
+                        .ok_or_else(|| "conflicted edit lost its retained attempt".to_string())?;
+                        let conn = crate::managed_agents::retention::open_retention_db(
+                            &scope.db_path,
+                        )?;
+                        if !crate::managed_agents::retention::mark_managed_agent_aggregate_synced(
+                            &conn,
+                            &pending.owner_pubkey,
+                            &pending.agent_pubkey,
+                            pending.generation,
+                            &pending.private_event_id,
+                        )? {
+                            return Err("conflicted edit could not retire its retained attempt".to_string());
+                        }
+                        let rollback = rollback.as_ref().ok_or_else(|| {
+                            "missing local rollback state after authoritative conflict".to_string()
+                        })?;
+                        rollback_failed_agent_update(
+                            &app,
+                            &state,
+                            &summary.pubkey,
+                            rollback.clone(),
+                        )?;
+                        return Err(format!(
+                            "Agent edit conflicted with a newer relay head. No local changes were kept: {sync_error}"
+                        ));
+                    }
                     return Err(format!(
-                        "Agent edit failed before relay authority could be confirmed. No local changes were kept: {sync_error}"
+                        "Agent edit is retained for relay retry; local changes remain pending confirmation: {sync_error}"
                     ));
                 }
             };
