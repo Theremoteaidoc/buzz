@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   EMPTY_JOIN_ALERT_LEDGER,
-  JOIN_ALERT_SEEN_MAX_ITEMS,
+  JOIN_ALERT_DEPARTED_MAX_ITEMS,
   joinAlertBody,
   joinAlertTitle,
   readJoinAlertLedger,
@@ -16,12 +16,23 @@ const OWNER = "a".repeat(64);
 const ALICE = "b".repeat(64);
 const BOB = "c".repeat(64);
 
-function installLocalStorage() {
+function installLocalStorage({ throwOnSet = false } = {}) {
   const values = new Map();
   globalThis.window = {
     localStorage: {
+      get length() {
+        return values.size;
+      },
+      key: (index) => [...values.keys()][index] ?? null,
       getItem: (key) => values.get(key) ?? null,
-      setItem: (key, value) => values.set(key, value),
+      setItem: (key, value) => {
+        if (throwOnSet) {
+          const error = new Error("quota exceeded");
+          error.name = "QuotaExceededError";
+          throw error;
+        }
+        values.set(key, value);
+      },
       removeItem: (key) => values.delete(key),
     },
   };
@@ -179,21 +190,71 @@ test("unreadable storage reads as an unseeded ledger", () => {
   });
 });
 
-test("the ledger is bounded, shedding the oldest pubkeys", () => {
+test("a roster larger than the departed cap never re-alerts its own members", () => {
+  // Regression: capping *all* retained keys shed pubkeys that were still on the
+  // roster, so the next snapshot saw them as unknown and alerted again — every
+  // snapshot, forever, for any community past the cap.
   installLocalStorage();
 
   const roster = Array.from(
-    { length: JOIN_ALERT_SEEN_MAX_ITEMS + 10 },
+    { length: JOIN_ALERT_DEPARTED_MAX_ITEMS + 100 },
+    (_unused, index) => index.toString(16).padStart(64, "0"),
+  );
+
+  const seeded = applySnapshot(EMPTY_JOIN_ALERT_LEDGER, roster);
+  assert.deepEqual(seeded.alerts, []);
+  assert.equal(seeded.ledger.pubkeys.length, roster.length);
+
+  for (let pass = 0; pass < 3; pass++) {
+    const repeat = applySnapshot(readJoinAlertLedger(COMMUNITY, OWNER), roster);
+    assert.deepEqual(repeat.alerts, []);
+    assert.equal(repeat.changed, false);
+  }
+
+  // The read path must not truncate either: a stored ledger above the cap has
+  // to come back whole or the same re-alert loop reopens on reload.
+  assert.equal(
+    readJoinAlertLedger(COMMUNITY, OWNER).pubkeys.length,
+    roster.length,
+  );
+});
+
+test("the cap sheds only departed pubkeys, oldest first", () => {
+  installLocalStorage();
+
+  const roster = Array.from(
+    { length: JOIN_ALERT_DEPARTED_MAX_ITEMS + 10 },
     (_unused, index) => index.toString(16).padStart(64, "0"),
   );
   const seeded = applySnapshot(EMPTY_JOIN_ALERT_LEDGER, roster).ledger;
 
-  assert.equal(seeded.pubkeys.length, JOIN_ALERT_SEEN_MAX_ITEMS);
-  assert.equal(seeded.pubkeys.at(-1), roster.at(-1));
+  // Everyone leaves except the newest member; one new key joins.
+  const survivor = roster.at(-1);
+  const shrunk = applySnapshot(seeded, [OWNER, survivor, BOB]);
+
+  assert.deepEqual(shrunk.alerts, [BOB]);
+  // 5010 retained - 9 departed over the cap, plus BOB.
+  assert.equal(shrunk.ledger.pubkeys.length, roster.length - 9 + 1);
+  assert.equal(shrunk.ledger.pubkeys.includes(roster[0]), false);
+  assert.equal(shrunk.ledger.pubkeys.includes(roster[8]), false);
+  assert.equal(shrunk.ledger.pubkeys.includes(roster[9]), true);
+  // The on-roster key is retained no matter where it sits in insertion order.
+  assert.equal(shrunk.ledger.pubkeys.includes(survivor), true);
+});
+
+test("a write that cannot land is reported, not thrown", () => {
+  // The writer runs inside an async snapshot handler: a raw QuotaExceededError
+  // would reject before the notification is sent, on every snapshot.
+  installLocalStorage({ throwOnSet: true });
+
   assert.equal(
-    readJoinAlertLedger(COMMUNITY, OWNER).pubkeys.length,
-    JOIN_ALERT_SEEN_MAX_ITEMS,
+    writeJoinAlertLedger(COMMUNITY, OWNER, { seeded: true, pubkeys: [ALICE] }),
+    false,
   );
+  assert.deepEqual(readJoinAlertLedger(COMMUNITY, OWNER), {
+    seeded: false,
+    pubkeys: [],
+  });
 });
 
 test("notification copy names the community when known", () => {

@@ -23,14 +23,20 @@
  * events at or after `lastSeenCreatedAt - skew` and can repeat a seen delta.
  */
 
+import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
+
 const JOIN_ALERT_STORAGE_PREFIX = "buzz-community-join-seen.v1";
 
 /**
- * Cap on retained pubkeys per community. Ledger entries are only consulted for
- * membership, so the oldest are the safest to shed once a roster grows past
- * this bound.
+ * Cap on *departed* pubkeys retained per community.
+ *
+ * A pubkey still on the roster can never be shed: the next snapshot presents it
+ * again, the ledger no longer recognizes it, and it is alerted as a fresh join
+ * — on every snapshot, forever. So the cap bounds only the tail of keys that
+ * have left, and the ledger's real ceiling is the roster the relay can deliver
+ * (a kind:13534 snapshot larger than `BUZZ_MAX_FRAME_BYTES` never arrives).
  */
-export const JOIN_ALERT_SEEN_MAX_ITEMS = 5_000;
+export const JOIN_ALERT_DEPARTED_MAX_ITEMS = 5_000;
 
 export type JoinAlertLedger = {
   /**
@@ -95,34 +101,39 @@ export function readJoinAlertLedger(
       // folded in, so unreadable/absent `seeded` reads as true. Defaulting the
       // other way would re-seed and drop a real join.
       seeded: seeded !== false,
-      pubkeys: pubkeys
-        .filter((value): value is string => typeof value === "string")
-        .slice(-JOIN_ALERT_SEEN_MAX_ITEMS),
+      pubkeys: pubkeys.filter(
+        (value): value is string => typeof value === "string",
+      ),
     };
   } catch {
     return EMPTY_JOIN_ALERT_LEDGER;
   }
 }
 
+/**
+ * Persist the ledger. Returns false when the write did not land.
+ *
+ * Routed through the quota-aware writer rather than `localStorage.setItem`:
+ * this runs inside an async snapshot handler, where a raw QuotaExceededError
+ * would reject before the notification is ever sent, and it would do so on
+ * every subsequent snapshot too.
+ */
 export function writeJoinAlertLedger(
   communityId: string,
   viewerPubkey: string,
   ledger: JoinAlertLedger,
-) {
+): boolean {
   if (
     typeof window === "undefined" ||
     communityId.length === 0 ||
     viewerPubkey.length === 0
   ) {
-    return;
+    return false;
   }
 
-  window.localStorage.setItem(
+  return setLocalStorageItemWithRecovery(
     joinAlertStorageKey(communityId, viewerPubkey),
-    JSON.stringify({
-      seeded: ledger.seeded,
-      pubkeys: ledger.pubkeys.slice(-JOIN_ALERT_SEEN_MAX_ITEMS),
-    } satisfies JoinAlertLedger),
+    JSON.stringify(ledger satisfies JoinAlertLedger),
   );
 }
 
@@ -147,12 +158,14 @@ export function reconcileJoinAlertLedger({
 }): { alerts: string[]; changed: boolean; ledger: JoinAlertLedger } {
   const normalizedViewer = normalizeJoinPubkey(viewerPubkey);
   const seen = new Set(ledger.pubkeys);
+  const roster = new Set<string>();
   const fresh: string[] = [];
 
   for (const rawPubkey of rosterPubkeys) {
     const pubkey = normalizeJoinPubkey(rawPubkey);
     if (pubkey.length === 0) continue;
     if (pubkey === normalizedViewer) continue;
+    roster.add(pubkey);
     if (seen.has(pubkey)) continue;
     seen.add(pubkey);
     fresh.push(pubkey);
@@ -162,12 +175,24 @@ export function reconcileJoinAlertLedger({
     return { alerts: [], changed: false, ledger };
   }
 
+  // Shed only pubkeys absent from the roster we were just handed. Capping the
+  // whole ledger instead would evict keys that are still members, and every
+  // later snapshot would then re-alert them — permanently, once the roster
+  // passes the cap.
+  const departed = ledger.pubkeys.filter((pubkey) => !roster.has(pubkey));
+  const shedCount = departed.length - JOIN_ALERT_DEPARTED_MAX_ITEMS;
+  const shed = shedCount > 0 ? new Set(departed.slice(0, shedCount)) : null;
+  const retained =
+    shed === null
+      ? ledger.pubkeys
+      : ledger.pubkeys.filter((pubkey) => !shed.has(pubkey));
+
   return {
     alerts: ledger.seeded ? fresh : [],
     changed: true,
     ledger: {
       seeded: true,
-      pubkeys: [...ledger.pubkeys, ...fresh].slice(-JOIN_ALERT_SEEN_MAX_ITEMS),
+      pubkeys: [...retained, ...fresh],
     },
   };
 }
