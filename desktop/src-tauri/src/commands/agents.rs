@@ -74,12 +74,14 @@ pub(super) fn tombstone_managed_agent_pending(
     app: &AppHandle,
     state: &AppState,
     agent_pubkey: &str,
+    relay_authority: &crate::managed_agents::RelayAuthority,
 ) {
     use crate::managed_agents::{
         agent_events::build_agent_delete,
+        migration::build_tombstone_event,
         retention::{
-            delete_retained_event, open_retention_db, retain_event, tombstone_retention_d_tag,
-            RetainedEvent,
+            delete_retained_event, open_retention_db, retain_event, retain_managed_agent_aggregate,
+            tombstone_retention_d_tag, RetainedEvent, RetainedManagedAgentAggregate,
         },
     };
     use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
@@ -90,11 +92,51 @@ pub(super) fn tombstone_managed_agent_pending(
     let result = (|| -> Result<(), String> {
         let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
         let owner_pubkey = scope.owner_keys.public_key().to_hex();
+        let mut conn = open_retention_db(&scope.db_path)?;
+        delete_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, agent_pubkey)?;
+
+        if let Some(evidence) = relay_authority.evidence() {
+            let timestamp = crate::util::now_iso();
+            let event = build_tombstone_event(
+                &scope.owner_keys,
+                agent_pubkey,
+                evidence.generation,
+                &evidence.private_event_id,
+                &timestamp,
+                nostr::Timestamp::now().as_secs(),
+            )
+            .map_err(|error| {
+                format!("failed to build managed-agent aggregate tombstone: {error:?}")
+            })?;
+            let generation = evidence
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| "managed-agent aggregate generation overflow".to_string())?;
+            let request_json = serde_json::to_string(&serde_json::json!({
+                "private_event": event,
+                "definition_event": null,
+                "instance_event": null,
+                "expected_definition_revision": null
+            }))
+            .map_err(|error| format!("failed to serialize managed-agent tombstone: {error}"))?;
+            return retain_managed_agent_aggregate(
+                &mut conn,
+                &RetainedManagedAgentAggregate {
+                    owner_pubkey,
+                    agent_pubkey: agent_pubkey.to_string(),
+                    generation,
+                    private_event_id: event.id.to_hex(),
+                    state: "deleted".to_string(),
+                    request_json,
+                    pending_sync: true,
+                    last_error: None,
+                },
+            );
+        }
+
         let event = build_agent_delete(agent_pubkey, &owner_pubkey)?
             .sign_with_keys(&scope.owner_keys)
             .map_err(|e| format!("failed to sign managed-agent tombstone: {e}"))?;
-        let conn = open_retention_db(&scope.db_path)?;
-        delete_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, agent_pubkey)?;
         retain_event(
             &conn,
             &RetainedEvent {
@@ -1322,6 +1364,11 @@ pub async fn delete_managed_agent(
                 }
             }
 
+            let relay_authority = records
+                .iter()
+                .find(|record| record.pubkey == pubkey)
+                .map(|record| record.relay_authority.clone())
+                .ok_or_else(|| format!("agent {pubkey} not found"))?;
             if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
                 stop_managed_agent_process(&app, record, &mut runtimes)?;
             }
@@ -1338,7 +1385,7 @@ pub async fn delete_managed_agent(
             // guard above and a confirmed removal — never orphan a live remote
             // deployment's relay record. Inside the lock, before the block closes
             // (no .await here). Every agent published, so every delete tombstones.
-            tombstone_managed_agent_pending(&app, &state, &pubkey);
+            tombstone_managed_agent_pending(&app, &state, &pubkey, &relay_authority);
             // NIP-IA: archive the deleted agent's identity on the relay so it
             // stops appearing in member pickers and autocomplete. Same
             // best-effort, inside-the-lock contract as the tombstone above.

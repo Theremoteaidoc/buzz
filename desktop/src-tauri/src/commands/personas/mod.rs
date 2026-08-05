@@ -181,6 +181,11 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                     remote_deployed.join(", ")
                 ));
             }
+            let cascade_authorities: std::collections::HashMap<_, _> = agents
+                .iter()
+                .filter(|agent| cascade.contains(&agent.pubkey))
+                .map(|agent| (agent.pubkey.clone(), agent.relay_authority.clone()))
+                .collect();
 
             // ── Phase 2: Stop ───────────────────────────────────────────────
             //
@@ -236,7 +241,14 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 state.clear_agent_session_caches(pk);
                 // Remove nsec from keyring after the record is gone.
                 delete_agent_key(pk);
-                super::agents::tombstone_managed_agent_pending(&app, &state, pk);
+                super::agents::tombstone_managed_agent_pending(
+                    &app,
+                    &state,
+                    pk,
+                    cascade_authorities
+                        .get(pk)
+                        .ok_or_else(|| format!("agent {pk} authority missing"))?,
+                );
                 super::agents::archive_managed_agent_pending(&app, &state, pk);
             }
             tombstone_persona_pending(&app, &state, &d_tag);
