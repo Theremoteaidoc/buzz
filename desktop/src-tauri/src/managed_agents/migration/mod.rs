@@ -157,6 +157,18 @@ pub struct PromotionEvidence {
     pub definition_revision: u64,
 }
 
+/// Proof that a deleted aggregate request was committed and read back exactly.
+///
+/// Deleted heads do not carry public projections or an active private body, so
+/// their verification contract is intentionally smaller than promotion's but
+/// just as strict about the submitted event and CAS metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletionEvidence {
+    pub head_event_id: String,
+    pub generation: u64,
+    pub previous_event_id: String,
+}
+
 /// Build the next minimal deleted aggregate from verified relay-head evidence.
 ///
 /// A tombstone carries no public projections or private active body. It advances
@@ -467,6 +479,69 @@ pub fn verify_promotion(
         definition_event_id: source_active.definition.event_id.clone(),
         instance_event_id: source_active.instance_projection.event_id.clone(),
         definition_revision: source_active.definition.revision,
+    })
+}
+
+/// Verify a relay read-back for an exact deleted aggregate request.
+///
+/// The submitted event is the immutable retry input retained by Desktop. The
+/// response must return that byte-identical event and echo its deleted CAS head;
+/// deleted heads must not grow public projections or a definition revision.
+pub fn verify_deletion(
+    submitted_event: &Event,
+    response: &AggregateResponse,
+    owner_keys: &Keys,
+) -> Result<DeletionEvidence, MigrationError> {
+    let (envelope, payload) = pma::validate_and_decrypt(submitted_event, owner_keys)
+        .map_err(|e| MigrationError::VerificationFailed(format!("submitted tombstone: {e}")))?;
+
+    let previous_event_id = payload.previous_event_id.clone().ok_or_else(|| {
+        MigrationError::VerificationFailed("submitted deletion has no predecessor".into())
+    })?;
+    if payload.state != State::Deleted || payload.active.is_some() || payload.deleted_at.is_none() {
+        return Err(MigrationError::VerificationFailed(
+            "submitted aggregate is not a valid deletion".into(),
+        ));
+    }
+    if !response.accepted {
+        return Err(MigrationError::VerificationFailed(
+            "relay did not accept aggregate deletion".into(),
+        ));
+    }
+    if &response.private_event != submitted_event {
+        return Err(MigrationError::VerificationFailed(
+            "read-back deletion head differs from submitted event".into(),
+        ));
+    }
+    verify_eq(
+        "response.event_id",
+        &response.event_id,
+        &submitted_event.id.to_hex(),
+    )?;
+    verify_eq(
+        "response.generation",
+        &response.generation,
+        &payload.generation,
+    )?;
+    verify_eq("response.state", &response.state.as_str(), &"deleted")?;
+    if response.definition_event.is_some()
+        || response.instance_event.is_some()
+        || response.definition_revision.is_some()
+    {
+        return Err(MigrationError::VerificationFailed(
+            "deleted read-back unexpectedly contains active projections".into(),
+        ));
+    }
+    verify_eq(
+        "envelope.generation",
+        &envelope.generation,
+        &payload.generation,
+    )?;
+
+    Ok(DeletionEvidence {
+        head_event_id: submitted_event.id.to_hex(),
+        generation: payload.generation,
+        previous_event_id,
     })
 }
 

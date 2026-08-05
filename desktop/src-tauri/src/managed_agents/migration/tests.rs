@@ -509,6 +509,98 @@ fn tombstone_rejects_invalid_coordinate_or_generation_overflow() {
 }
 
 #[test]
+fn verify_deleted_readback_accepts_exact_tombstone_and_rejects_active_residue() {
+    let owner = Keys::generate();
+    let agent = Keys::generate();
+    let previous_id = "11".repeat(32);
+    let event = build_tombstone_event(
+        &owner,
+        &agent.public_key().to_hex(),
+        7,
+        &previous_id,
+        "2026-08-05T18:00:00Z",
+        CREATED_AT,
+    )
+    .unwrap();
+    let mut response = AggregateResponse {
+        event_id: event.id.to_hex(),
+        generation: 8,
+        state: "deleted".into(),
+        accepted: true,
+        inserted: true,
+        private_event: event.clone(),
+        definition_event: None,
+        instance_event: None,
+        definition_revision: None,
+    };
+
+    assert_eq!(
+        verify_deletion(&event, &response, &owner).unwrap(),
+        DeletionEvidence {
+            head_event_id: event.id.to_hex(),
+            generation: 8,
+            previous_event_id: previous_id,
+        }
+    );
+
+    response.definition_revision = Some(7);
+    assert!(matches!(
+        verify_deletion(&event, &response, &owner),
+        Err(MigrationError::VerificationFailed(_))
+    ));
+}
+
+#[test]
+fn verify_deleted_readback_rejects_swapped_or_drifted_head() {
+    let owner = Keys::generate();
+    let agent = Keys::generate();
+    let event = build_tombstone_event(
+        &owner,
+        &agent.public_key().to_hex(),
+        2,
+        &"22".repeat(32),
+        "2026-08-05T18:00:00Z",
+        CREATED_AT,
+    )
+    .unwrap();
+    let other = build_tombstone_event(
+        &owner,
+        &agent.public_key().to_hex(),
+        2,
+        &"22".repeat(32),
+        "2026-08-05T18:00:01Z",
+        CREATED_AT + 1,
+    )
+    .unwrap();
+    let base = AggregateResponse {
+        event_id: event.id.to_hex(),
+        generation: 3,
+        state: "deleted".into(),
+        accepted: true,
+        inserted: false,
+        private_event: event.clone(),
+        definition_event: None,
+        instance_event: None,
+        definition_revision: None,
+    };
+
+    for mutate in 0..4 {
+        let mut response = base.clone();
+        match mutate {
+            0 => response.private_event = other.clone(),
+            1 => response.event_id = other.id.to_hex(),
+            2 => response.generation += 1,
+            3 => response.accepted = false,
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            verify_deletion(&event, &response, &owner),
+            Err(MigrationError::VerificationFailed(_))
+        ));
+    }
+}
+
+#[test]
 fn verify_rejects_stale_generation_head() {
     let fx = Fixture::new();
     let candidate = fx.build().expect("candidate builds");
