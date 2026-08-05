@@ -224,9 +224,68 @@ pub async fn apply_workspace(
             migrate_legacy_retention_into(&restore_app, &scope);
             crate::event_sync::spawn_event_sync(
                 restore_app.clone(),
-                scope.owner_keys,
-                scope.db_path,
-            )
+                scope.owner_keys.clone(),
+                scope.db_path.clone(),
+            );
+
+            // PMA activation is scoped to the exact relay+owner snapshot above.
+            // Capability discovery fails closed; the legacy record remains
+            // authoritative unless submission, strict read-back verification,
+            // local authority persistence, and compare-and-clear all succeed.
+            let migration_app = restore_app.clone();
+            let migration_client = state.http_client.clone();
+            let migration_relay_api = crate::relay::relay_http_base_url(&scope.relay_url);
+            tauri::async_runtime::spawn(async move {
+                let extensions =
+                    match crate::managed_agents::migration::activation::discover_relay_extensions(
+                        &migration_client,
+                        &migration_relay_api,
+                    )
+                    .await
+                    {
+                        Ok(extensions) => extensions,
+                        Err(error) => {
+                            eprintln!("buzz-desktop: PMA capability discovery failed: {error}");
+                            return;
+                        }
+                    };
+                let app = migration_app.clone();
+                let keys = scope.owner_keys.clone();
+                let db_path = scope.db_path.clone();
+                let enqueue_extensions = extensions.clone();
+                match tauri::async_runtime::spawn_blocking(move || {
+                    crate::managed_agents::migration::activation::enqueue_initial_migrations(
+                        &app,
+                        &keys,
+                        &db_path,
+                        &enqueue_extensions,
+                    )
+                })
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        eprintln!("buzz-desktop: PMA migration enqueue failed: {error}");
+                        return;
+                    }
+                    Err(error) => {
+                        eprintln!("buzz-desktop: PMA migration enqueue task failed: {error}");
+                        return;
+                    }
+                }
+                if let Err(error) =
+                    crate::managed_agents::migration::activation::flush_pending_migrations(
+                        &migration_app,
+                        &migration_client,
+                        &migration_relay_api,
+                        &scope.owner_keys,
+                        &scope.db_path,
+                    )
+                    .await
+                {
+                    eprintln!("buzz-desktop: PMA migration flush failed: {error}");
+                }
+            });
         }
         Err(error) => {
             eprintln!("buzz-desktop: scoped event-sync unavailable after workspace apply: {error}");

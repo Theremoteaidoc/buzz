@@ -26,13 +26,13 @@
 //!     [`record_managed_agent_aggregate_error`](crate::managed_agents::retention::record_managed_agent_aggregate_error)
 //!     and leaves `pending_sync = 1`.
 
+use std::path::Path;
+
 use nostr::{Event, Keys};
 use reqwest::Method;
-use rusqlite::Connection;
 use serde::Deserialize;
 
 use super::{verify_promotion, AggregateResponse, MigrationCandidate, PromotionEvidence};
-use crate::app_state::AppState;
 use crate::managed_agents::retention::{
     get_retained_managed_agent_aggregate, record_managed_agent_aggregate_error,
 };
@@ -67,6 +67,8 @@ pub(crate) struct RetainedAttempt {
     pub generation: u64,
     pub private_event_id: String,
     pub state: String,
+    /// Source record revision bound inside the encrypted retained payload.
+    pub source_updated_at: String,
 }
 
 /// What one drive of a retained aggregate resolved to.
@@ -95,15 +97,19 @@ pub(crate) enum SubmitOutcome {
 /// compare-and-clear ordering.
 #[allow(dead_code)] // Consumed by the boot/reconcile lane (sibling); exercised by this module's tests.
 pub(crate) async fn submit_retained_aggregate(
-    state: &AppState,
-    conn: &Connection,
+    http_client: &reqwest::Client,
+    relay_api_base_url: &str,
+    db_path: &Path,
     owner_keys: &Keys,
     owner_pubkey: &str,
     agent_pubkey: &str,
 ) -> Result<SubmitOutcome, String> {
-    let row = match get_retained_managed_agent_aggregate(conn, owner_pubkey, agent_pubkey)? {
-        Some(row) if row.pending_sync => row,
-        _ => return Ok(SubmitOutcome::Nothing),
+    let row = {
+        let conn = crate::managed_agents::retention::open_retention_db(db_path)?;
+        match get_retained_managed_agent_aggregate(&conn, owner_pubkey, agent_pubkey)? {
+            Some(row) if row.pending_sync => row,
+            _ => return Ok(SubmitOutcome::Nothing),
+        }
     };
 
     // Fail-fast guard: the retained head id/generation is what we will confirm.
@@ -115,14 +121,16 @@ pub(crate) async fn submit_retained_aggregate(
     let record_failure = |error: String| -> Result<SubmitOutcome, String> {
         // A best-effort diagnostic write must not mask the real error; if the
         // update itself fails we still surface the original failure.
-        let _ = record_managed_agent_aggregate_error(
-            conn,
-            owner_pubkey,
-            agent_pubkey,
-            generation,
-            &private_event_id,
-            &error,
-        );
+        if let Ok(conn) = crate::managed_agents::retention::open_retention_db(db_path) {
+            let _ = record_managed_agent_aggregate_error(
+                &conn,
+                owner_pubkey,
+                agent_pubkey,
+                generation,
+                &private_event_id,
+                &error,
+            );
+        }
         Ok(SubmitOutcome::Retained { error })
     };
 
@@ -143,7 +151,14 @@ pub(crate) async fn submit_retained_aggregate(
         );
     }
 
-    let response = match submit_to_relay(state, owner_keys, row.request_json.as_bytes()).await {
+    let response = match submit_to_relay(
+        http_client,
+        relay_api_base_url,
+        owner_keys,
+        row.request_json.as_bytes(),
+    )
+    .await
+    {
         Ok(response) => response,
         Err(error) => return record_failure(error),
     };
@@ -164,6 +179,7 @@ pub(crate) async fn submit_retained_aggregate(
         ));
     }
 
+    let source_updated_at = candidate.payload.updated_at.clone();
     Ok(SubmitOutcome::Verified {
         attempt: RetainedAttempt {
             owner_pubkey: row.owner_pubkey,
@@ -171,6 +187,7 @@ pub(crate) async fn submit_retained_aggregate(
             generation,
             private_event_id,
             state: row.state,
+            source_updated_at,
         },
         evidence,
     })
@@ -179,20 +196,22 @@ pub(crate) async fn submit_retained_aggregate(
 /// POST the exact request bytes with fresh owner-signed NIP-98 auth and
 /// strict-deserialize the aggregate response.
 async fn submit_to_relay(
-    state: &AppState,
+    http_client: &reqwest::Client,
+    relay_api_base_url: &str,
     owner_keys: &Keys,
     body: &[u8],
 ) -> Result<AggregateResponse, String> {
     crate::egress_guard::assert_no_key_backup_bytes(body, "managed-agent aggregate submit")?;
     crate::relay_admission::wait_for_rate_limit().await;
 
-    let base = crate::relay::relay_api_base_url_with_override(state);
-    let url = format!("{}{AGGREGATE_PATH}", base.trim_end_matches('/'));
+    let url = format!(
+        "{}{AGGREGATE_PATH}",
+        relay_api_base_url.trim_end_matches('/')
+    );
     let auth_header =
         crate::relay::build_nip98_auth_header_for_keys(owner_keys, &Method::POST, &url, body)?;
 
-    let response = state
-        .http_client
+    let response = http_client
         .post(&url)
         .header("Authorization", auth_header)
         .header("Content-Type", "application/json")

@@ -267,8 +267,9 @@ async fn faithful_read_back_returns_evidence_leaves_pending_and_posts_verbatim()
     let state = app_state_at(url);
 
     let outcome = submit_retained_aggregate(
-        &state,
-        &conn,
+        &state.http_client,
+        &crate::relay::relay_api_base_url_with_override(&state),
+        &dir.path().join("retention.db"),
         &fx.owner_keys,
         &fx.owner_hex(),
         &fx.agent_hex(),
@@ -286,6 +287,7 @@ async fn faithful_read_back_returns_evidence_leaves_pending_and_posts_verbatim()
                 fx.candidate.signed_event.id.to_hex()
             );
             assert_eq!(attempt.state, "active");
+            assert_eq!(attempt.source_updated_at, "2025-01-01T00:00:00Z");
             assert_eq!(evidence.generation, fx.cas.generation);
             assert_eq!(
                 evidence.head_event_id,
@@ -325,8 +327,9 @@ async fn conflict_status_preserves_retry_with_diagnostic() {
     let state = app_state_at(url);
 
     let outcome = submit_retained_aggregate(
-        &state,
-        &conn,
+        &state.http_client,
+        &crate::relay::relay_api_base_url_with_override(&state),
+        &dir.path().join("retention.db"),
         &fx.owner_keys,
         &fx.owner_hex(),
         &fx.agent_hex(),
@@ -356,8 +359,9 @@ async fn malformed_success_body_preserves_retry() {
     let state = app_state_at(url);
 
     let outcome = submit_retained_aggregate(
-        &state,
-        &conn,
+        &state.http_client,
+        &crate::relay::relay_api_base_url_with_override(&state),
+        &dir.path().join("retention.db"),
         &fx.owner_keys,
         &fx.owner_hex(),
         &fx.agent_hex(),
@@ -391,8 +395,9 @@ async fn tampered_read_back_fails_verification_and_preserves_retry() {
     let state = app_state_at(url);
 
     let outcome = submit_retained_aggregate(
-        &state,
-        &conn,
+        &state.http_client,
+        &crate::relay::relay_api_base_url_with_override(&state),
+        &dir.path().join("retention.db"),
         &fx.owner_keys,
         &fx.owner_hex(),
         &fx.agent_hex(),
@@ -428,8 +433,9 @@ async fn row_coordinate_disagreeing_with_request_is_rejected_before_egress() {
     let state = app_state_at(url);
 
     let outcome = submit_retained_aggregate(
-        &state,
-        &conn,
+        &state.http_client,
+        &crate::relay::relay_api_base_url_with_override(&state),
+        &dir.path().join("retention.db"),
         &fx.owner_keys,
         &fx.owner_hex(),
         &fx.agent_hex(),
@@ -453,7 +459,7 @@ async fn row_coordinate_disagreeing_with_request_is_rejected_before_egress() {
 async fn no_pending_row_is_a_noop() {
     let fx = Fixture::new();
     let dir = tempfile::tempdir().expect("tempdir");
-    let conn = open_retention_db(&dir.path().join("retention.db")).expect("open db");
+    open_retention_db(&dir.path().join("retention.db")).expect("open db");
 
     let (url, captured) = spawn_stub(StubReply {
         status: StatusCode::OK,
@@ -463,8 +469,9 @@ async fn no_pending_row_is_a_noop() {
     let state = app_state_at(url);
 
     let outcome = submit_retained_aggregate(
-        &state,
-        &conn,
+        &state.http_client,
+        &crate::relay::relay_api_base_url_with_override(&state),
+        &dir.path().join("retention.db"),
         &fx.owner_keys,
         &fx.owner_hex(),
         &fx.agent_hex(),
