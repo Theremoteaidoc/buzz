@@ -206,11 +206,20 @@ globalThis.window.localStorage = globalThis.localStorage;
 // success). Recording the constructor calls is how we count alerts.
 
 const notifications = [];
+/**
+ * Optional hook fired synchronously from inside the Notification constructor.
+ *
+ * The named-alert loop awaits each send, so "a demotion lands between send 1
+ * and send 2" is only expressible from inside a send. Nothing else in the
+ * harness can reach that point in the loop.
+ */
+let onNotification = null;
 
 class StubNotification {
   static permission = "granted";
   constructor(title, options) {
     notifications.push({ title, body: options?.body, options });
+    if (onNotification) onNotification(notifications.length);
   }
   close() {}
 }
@@ -487,6 +496,41 @@ async function settleAfterNotifyWindow() {
   await settle();
 }
 
+/**
+ * Hold the profile lookup open so the timer-fired/lookup-in-flight window is
+ * addressable from a test.
+ *
+ * `flushPending` consumes the pending refs at entry and then awaits
+ * `getUsersBatch` before it sends anything. Every arm that wants to assert on
+ * a revocation arriving DURING a flush has to be able to park the flush there;
+ * without this, the whole flush runs inside one microtask drain and the
+ * ordering Max and Wren found is not expressible at all.
+ *
+ * Routed through the Tauri IPC shim rather than a module mock so the real
+ * `getUsersBatch` runs — a stubbed production function would be a fixture
+ * re-declaring the code under test.
+ */
+function deferProfileLookup() {
+  let release = null;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  ipcHandlers.set("get_users_batch", async () => {
+    calls += 1;
+    await gate;
+    return { profiles: {}, missing: [] };
+  });
+  return {
+    calls: () => calls,
+    /** Let the in-flight lookup resolve, then drain. */
+    release: async () => {
+      release();
+      await settle();
+    },
+  };
+}
+
 function ledgerKeys() {
   return [...storage.keys()].filter((key) =>
     key.startsWith("buzz-community-join-seen.v1"),
@@ -500,6 +544,8 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
     storage.clear();
     storageFull = false;
     notifications.length = 0;
+    onNotification = null;
+    ipcHandlers.clear();
     seedCommunities(COMMUNITY_A);
   });
 
@@ -1296,5 +1342,245 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
       0,
       "a torn-down mount must not fire its pending batch",
     );
+  });
+
+  // ── Mid-flight cancellation (Max's race, Wren's arm list) ──────────────────
+  //
+  // Clearing the pending refs cannot stop a flush that already consumed them.
+  // Every send sits behind an await — the profile lookup, then each
+  // notification — so a revocation landing after the timer fired but before
+  // the sends resolve delivered anyway at 5d0d2b4c. These arms pin the
+  // generation token that closes it. All five park the flush on a deferred
+  // `get_users_batch`; without that the ordering is not expressible.
+
+  it("suppresses an in-flight flush when a demotion lands during the lookup", async () => {
+    const relay = installRelayStub();
+    const profiles = deferProfileLookup();
+    const { render, unmount } = mountHook({ role: "admin" });
+
+    await render();
+    await settle();
+    relay.emitSnapshot(snapshot([VIEWER], { viewerRole: "admin" }));
+    await settle();
+
+    const roster = [VIEWER, ALICE, BOB];
+    relay.emitSnapshot(
+      snapshot([...roster], {
+        id: "inflight-joins",
+        createdAt: 14_000,
+        viewerRole: "admin",
+      }),
+    );
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      profiles.calls(),
+      1,
+      "precondition: flush is parked on the lookup",
+    );
+    assert.equal(notifications.length, 0, "precondition: nothing sent yet");
+
+    // Authorization is revoked while the flush holds the batch in locals.
+    relay.emitSnapshot(
+      snapshot([...roster], {
+        id: "inflight-demote",
+        createdAt: 14_001,
+        viewerRole: "member",
+      }),
+    );
+    await settle();
+
+    await profiles.release();
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      notifications.length,
+      0,
+      "a demotion during the profile lookup must abort the resumed flush",
+    );
+
+    await unmount();
+  });
+
+  it("suppresses an in-flight flush when the viewer is removed during the lookup", async () => {
+    const relay = installRelayStub();
+    const profiles = deferProfileLookup();
+    const { render, unmount } = mountHook({ role: "admin" });
+
+    await render();
+    await settle();
+    relay.emitSnapshot(snapshot([VIEWER], { viewerRole: "admin" }));
+    await settle();
+
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB], {
+        id: "removal-joins",
+        createdAt: 15_000,
+        viewerRole: "admin",
+      }),
+    );
+    await settleAfterNotifyWindow();
+    assert.equal(
+      profiles.calls(),
+      1,
+      "precondition: flush is parked on the lookup",
+    );
+
+    // Dropped from the roster entirely — fail closed, same as a demotion.
+    relay.emitSnapshot(
+      snapshot([ALICE, BOB], { id: "removal", createdAt: 15_001 }),
+    );
+    await settle();
+
+    await profiles.release();
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      notifications.length,
+      0,
+      "removal during the profile lookup must abort the resumed flush",
+    );
+
+    await unmount();
+  });
+
+  it("suppresses an in-flight flush across a community switch, under either name", async () => {
+    const relay = installRelayStub();
+    const profiles = deferProfileLookup();
+    const { render, switchCommunity, unmount } = mountHook();
+
+    await render();
+    await settle();
+    relay.emitSnapshot(snapshot([VIEWER]));
+    await settle();
+
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB], {
+        id: "switch-joins",
+        createdAt: 16_000,
+      }),
+    );
+    await settleAfterNotifyWindow();
+    assert.equal(
+      profiles.calls(),
+      1,
+      "precondition: flush is parked on the lookup",
+    );
+
+    await switchCommunity(COMMUNITY_B);
+    await profiles.release();
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      notifications.length,
+      0,
+      "community A's keys must not deliver after the switch to B",
+    );
+    // The title is read at send time from a ref, so a surviving flush would
+    // also mislabel A's joiners as B's. Assert the mislabel is impossible
+    // rather than inferring it from the count above.
+    assert.ok(
+      notifications.every((entry) => !entry.title.includes("Community B")),
+      "no alert may carry the new community's title",
+    );
+
+    await unmount();
+  });
+
+  it("suppresses the remainder of a batch when a demotion lands between sends", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook({ role: "admin" });
+
+    await render();
+    await settle();
+    relay.emitSnapshot(snapshot([VIEWER], { viewerRole: "admin" }));
+    await settle();
+
+    const roster = [VIEWER, ALICE, BOB, CAROL];
+    relay.emitSnapshot(
+      snapshot([...roster], {
+        id: "midloop-joins",
+        createdAt: 17_000,
+        viewerRole: "admin",
+      }),
+    );
+    await settle();
+
+    // Fire the demotion from inside the first send — the only point in the
+    // program where "between named send 1 and send 2" exists.
+    onNotification = (count) => {
+      if (count !== 1) return;
+      onNotification = null;
+      relay.emitSnapshot(
+        snapshot([...roster], {
+          id: "midloop-demote",
+          createdAt: 17_001,
+          viewerRole: "member",
+        }),
+      );
+    };
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      notifications.length,
+      1,
+      "the send already in flight completes, but the rest of the batch is suppressed",
+    );
+
+    await unmount();
+  });
+
+  /**
+   * Positive control for the cancellation token, and the semantics Eva asked
+   * to be pinned: the generation bumps on CANCELLATION only, never on an
+   * ordinary enqueue. A newer authorized batch queued while an earlier flush's
+   * lookup is in flight must neither cancel it nor be cancelled by it — both
+   * deliver.
+   *
+   * Without this arm a token that bumped on every enqueue would pass all four
+   * arms above by suppressing everything, which is the failure mode a
+   * suppression test cannot see.
+   */
+  it("delivers both batches when a new authorized batch queues during a flush", async () => {
+    const relay = installRelayStub();
+    const profiles = deferProfileLookup();
+    const { render, unmount } = mountHook();
+
+    await render();
+    await settle();
+    relay.emitSnapshot(snapshot([VIEWER]));
+    await settle();
+
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE], { id: "batch-one", createdAt: 18_000 }),
+    );
+    await settleAfterNotifyWindow();
+    assert.equal(
+      profiles.calls(),
+      1,
+      "precondition: first flush parked on the lookup",
+    );
+    assert.equal(notifications.length, 0, "precondition: nothing sent yet");
+
+    // A second, fully authorized join arrives while the first flush waits.
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB], { id: "batch-two", createdAt: 18_001 }),
+    );
+    await settle();
+
+    await profiles.release();
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      notifications.length,
+      2,
+      "a legitimate concurrent batch must not erase, or be erased by, the in-flight one",
+    );
+    assert.ok(
+      notifications.every((entry) => entry.body.endsWith(" joined")),
+      "both alerts name their joiner",
+    );
+
+    await unmount();
   });
 });

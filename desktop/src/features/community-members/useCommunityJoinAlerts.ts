@@ -110,10 +110,25 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
   const pendingEventRef = React.useRef<RelayEvent | null>(null);
   const notifyTimerRef = React.useRef<number | null>(null);
 
-  /** Drop anything queued but not yet delivered. */
+  // Cancellation token for flushes already past the refs.
+  //
+  // Clearing the refs cannot stop a flush that has already consumed them and
+  // is parked on an await, and every send in `flushPending` sits behind one:
+  // the profile lookup, and each notification itself. A demotion, removal,
+  // unmount, or community switch landing in that window would otherwise still
+  // deliver — Max and Wren both found this at 5d0d2b4c.
+  //
+  // Bumped ONLY by `clearPending`, never by an ordinary enqueue, so an
+  // authorized batch queued while an earlier flush's lookup is in flight
+  // neither cancels it nor is cancelled by it: both deliver. Cancellation is
+  // the only thing that invalidates a claim.
+  const flushGenerationRef = React.useRef(0);
+
+  /** Drop anything queued but not yet delivered, in flight or not. */
   const clearPending = React.useCallback(() => {
     pendingRef.current = [];
     pendingEventRef.current = null;
+    flushGenerationRef.current += 1;
     if (notifyTimerRef.current !== null) {
       window.clearTimeout(notifyTimerRef.current);
       notifyTimerRef.current = null;
@@ -127,12 +142,26 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
     pendingEventRef.current = null;
     if (alerts.length === 0 || !event) return;
 
+    // Claim this batch. Checked again at every side-effect boundary below —
+    // not merely after the awaits that exist today, so that adding an await
+    // later cannot silently reopen the disclosure.
+    const generation = flushGenerationRef.current;
+    const cancelled = () => flushGenerationRef.current !== generation;
+
+    // Bind the title to the community these keys were queued under, not to
+    // whatever is active when the send resolves. Cancellation already stops a
+    // flush that outlives its community, but a title read at send time would
+    // mislabel the batch if it ever did not — the referent is a property of
+    // the batch, so it is captured with the batch.
+    const title = joinAlertTitle(communityNameRef.current);
+
     // Resolve display names so the alert reads "Alice joined" rather than a
     // truncated key; a lookup failure degrades to the key, it does not skip.
     //
     // Above the cap the batch collapses into one summary, so skip the profile
     // fetch entirely — it would be a 250-key request whose result is unused.
     if (alerts.length > JOIN_ALERT_MAX_INDIVIDUAL) {
+      if (cancelled()) return;
       await sendDesktopNotification({
         body: joinAlertSummaryBody(alerts.length),
         target: {
@@ -141,7 +170,7 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
           kind: event.kind,
           pubkey: undefined,
         },
-        title: joinAlertTitle(communityNameRef.current),
+        title,
       });
       return;
     }
@@ -154,6 +183,10 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
     }
 
     for (const pubkey of alerts) {
+      // Per-send, not once after the lookup: a demotion landing between two
+      // named sends must suppress the rest of the batch, not just the batch
+      // that had not started.
+      if (cancelled()) return;
       await sendDesktopNotification({
         body: joinAlertBody(
           resolveUserLabel({ preferResolvedSelfLabel: true, profiles, pubkey }),
@@ -164,7 +197,7 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
           kind: event.kind,
           pubkey,
         },
-        title: joinAlertTitle(communityNameRef.current),
+        title,
       });
     }
   });
