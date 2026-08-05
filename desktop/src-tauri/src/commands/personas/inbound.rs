@@ -77,7 +77,9 @@ fn reconcile_inbound_persona_event_blocking(
         save_managed_agents, save_teams,
         team_events::team_content_from_event,
     };
-    use buzz_core_pkg::kind::{KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_TEAM};
+    use buzz_core_pkg::kind::{
+        KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRIVATE_MANAGED_AGENT, KIND_TEAM,
+    };
     use nostr::JsonUtil;
 
     let state = app.state::<AppState>();
@@ -96,8 +98,15 @@ fn reconcile_inbound_persona_event_blocking(
         return reconcile_inbound_tombstone(&event, &arrival_relay_url, &app, &state);
     }
 
-    if !matches!(kind, KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT) {
+    if !matches!(
+        kind,
+        KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT | KIND_PRIVATE_MANAGED_AGENT
+    ) {
         return Ok(());
+    }
+
+    if kind == KIND_PRIVATE_MANAGED_AGENT {
+        return reconcile_inbound_private_managed_agent(&event, &arrival_relay_url, &app, &state);
     }
 
     // The d-tag identifies the record within its kind. Persona derives it from
@@ -180,6 +189,129 @@ fn reconcile_inbound_persona_event_blocking(
     let _ = app.emit("agents-data-changed", ());
 
     Ok(())
+}
+
+fn reconcile_inbound_private_managed_agent(
+    event: &nostr::Event,
+    arrival_relay_url: &str,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    use buzz_core_pkg::private_managed_agent::{self as pma, State};
+
+    let owner_keys = state.signing_keys()?;
+    if event.pubkey != owner_keys.public_key() {
+        return Ok(());
+    }
+    if crate::managed_agents::retention::arrival_retention_scope(app, state, arrival_relay_url)?
+        .is_none()
+    {
+        return Ok(());
+    }
+
+    let (_, payload) = pma::validate_and_decrypt(event, &owner_keys)
+        .map_err(|error| format!("invalid private managed-agent aggregate: {error}"))?;
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let mut agents = crate::managed_agents::load_managed_agents(app)?;
+    let existing_index = agents
+        .iter()
+        .position(|record| record.pubkey == payload.agent_pubkey);
+
+    if let Some(index) = existing_index {
+        let authority = agents[index].relay_authority.evidence();
+        if authority.is_some_and(|evidence| {
+            payload.generation <= evidence.generation
+                || payload.previous_event_id.as_deref() != Some(&evidence.private_event_id)
+        }) {
+            return Ok(());
+        }
+        // A local legacy record is still authoritative until its own migration
+        // persists verified evidence. Never replace it from an unsolicited head.
+        if authority.is_none() {
+            return Ok(());
+        }
+    }
+
+    match payload.state {
+        State::Deleted => {
+            if let Some(index) = existing_index {
+                agents.remove(index);
+                crate::managed_agents::delete_agent_key(&payload.agent_pubkey);
+                state.clear_agent_session_caches(&payload.agent_pubkey);
+                crate::managed_agents::save_managed_agents(app, &agents)?;
+            }
+        }
+        State::Active => {
+            let reconstructed = reconstruct_managed_agent_from_payload(&payload, event)?;
+            match existing_index {
+                Some(index) => agents[index] = reconstructed,
+                None => agents.push(reconstructed),
+            }
+            crate::managed_agents::save_managed_agents(app, &agents)?;
+        }
+    }
+
+    try_regenerate_nest(app);
+    let _ = app.emit("agents-data-changed", ());
+    Ok(())
+}
+
+fn reconstruct_managed_agent_from_payload(
+    payload: &buzz_core_pkg::private_managed_agent::Payload,
+    private_event: &nostr::Event,
+) -> Result<ManagedAgentRecord, String> {
+    use crate::managed_agents::{
+        agent_events::managed_agent_content_from_event, persona_events::persona_from_event,
+        RelayAuthority, RelayAuthorityEvidence, RelayMeshConfig, VersionedBackend,
+    };
+
+    let active = payload
+        .active
+        .as_ref()
+        .ok_or_else(|| "active private aggregate is missing active payload".to_string())?;
+    let definition_event = &active.definition.recovery.signed_event;
+    let instance_event = &active.instance_projection.recovery.signed_event;
+    let definition = persona_from_event(definition_event)?;
+    let instance = managed_agent_content_from_event(instance_event)?;
+    let backend: VersionedBackend = serde_json::from_value(active.config.backend.clone())
+        .map_err(|error| format!("invalid private backend envelope: {error}"))?;
+    let relay_mesh = active
+        .config
+        .relay_mesh
+        .clone()
+        .map(serde_json::from_value::<RelayMeshConfig>)
+        .transpose()
+        .map_err(|error| format!("invalid private relay mesh config: {error}"))?;
+
+    let mut record = definition.into_agent_record();
+    record.pubkey = payload.agent_pubkey.clone();
+    record.name = instance.name;
+    record.persona_id = instance.persona_id;
+    record.private_key_nsec = active.identity.private_key_nsec.clone();
+    record.auth_tag = active.identity.auth_tag.clone();
+    record.relay_url = active.config.relay_url.clone();
+    record.agent_command_override = active.config.agent_command_override.clone();
+    record.agent_args = active.config.agent_args.clone();
+    record.idle_timeout_seconds = active.config.idle_timeout_seconds;
+    record.max_turn_duration_seconds = active.config.max_turn_duration_seconds;
+    record.env_vars = active.config.env_vars.clone().into_iter().collect();
+    record.backend = backend.backend;
+    record.backend_agent_id = active.config.backend_agent_id.clone();
+    record.team_id = active.config.team_id.clone();
+    record.persona_name_in_team = active.config.persona_name_in_team.clone();
+    record.relay_mesh = relay_mesh;
+    record.parallelism = instance.parallelism;
+    record.respond_to = instance.respond_to;
+    record.respond_to_allowlist = instance.respond_to_allowlist;
+    record.updated_at = payload.updated_at.clone();
+    record.relay_authority = RelayAuthority::relay_authoritative(RelayAuthorityEvidence {
+        generation: payload.generation,
+        private_event_id: private_event.id.to_hex(),
+    });
+    Ok(record)
 }
 
 /// Parse an inbound wire event and enforce the signature gate. Everything

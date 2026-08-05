@@ -56,7 +56,7 @@ pub use backend::*;
 // solely by `authority`'s own tests via `super::*`, so they need no re-export
 // yet; the not-yet-built migration path will add one when it actually consumes
 // them. No blanket `#[allow(dead_code)]` — unused API stays unexported.
-pub(crate) use authority::RelayAuthority;
+pub(crate) use authority::{RelayAuthority, RelayAuthorityEvidence, VersionedBackend};
 pub use discovery::*;
 pub use env_vars::*;
 #[cfg(windows)]

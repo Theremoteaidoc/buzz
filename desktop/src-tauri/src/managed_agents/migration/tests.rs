@@ -94,7 +94,9 @@ fn fully_valid_record() -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
-        relay_mesh: None,
+        relay_mesh: Some(crate::managed_agents::RelayMeshConfig {
+            model_ref: "mesh/model".to_string(),
+        }),
         relay_authority: super::super::authority::RelayAuthority::legacy(),
     }
 }
@@ -187,6 +189,11 @@ fn happy_round_trip_yields_promotion_evidence() {
     assert_eq!(evidence.generation, 1);
     assert_eq!(evidence.previous_event_id, None);
     assert_eq!(evidence.definition_revision, 7);
+    assert_eq!(
+        candidate.payload.active.as_ref().unwrap().config.relay_mesh,
+        Some(json!({ "model_ref": "mesh/model" })),
+        "relay mesh is private-canonical and must be carried",
+    );
 }
 
 #[test]

@@ -294,7 +294,12 @@ where
         backend_agent_id: record.backend_agent_id.clone(),
         team_id: record.team_id.clone(),
         persona_name_in_team: record.persona_name_in_team.clone(),
-        relay_mesh: None,
+        relay_mesh: record
+            .relay_mesh
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| MigrationError::Codec(format!("relay mesh envelope: {e}")))?,
     };
 
     let payload = Payload {
