@@ -213,6 +213,7 @@ pub fn build_tombstone_event(
 /// using the *actual* largest inserted codec value before sealing. Returns a
 /// [`MigrationError`] on any inconsistency; never persists or promotes.
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_migration_candidate<'a, I>(
     record: &ManagedAgentRecord,
     owner_keys: &Keys,
