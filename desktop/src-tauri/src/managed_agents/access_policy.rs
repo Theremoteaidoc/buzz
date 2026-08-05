@@ -1,4 +1,50 @@
 //! Distribution policy at managed-agent enforcement boundaries.
+//!
+//! ## What this build capability guarantees, and what it does not
+//!
+//! `BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY` marks a build whose managed agents may
+//! answer only their owner. Enforcement is applied at the two boundaries where
+//! Desktop hands access to something that runs the agent, and nowhere else. The
+//! stored record and its relay-advertised access fields are left untouched, so
+//! the same profile keeps its user-chosen access when it is opened in an OSS
+//! build.
+//!
+//! Enforced:
+//!
+//! - **Local spawn.** [`build_respond_to_env_with_policy`] clamps
+//!   `BUZZ_ACP_RESPOND_TO` to `owner-only` and pins the independent
+//!   `BUZZ_ACP_ALLOWED_RESPOND_TO=owner-only` guard on every start, whatever
+//!   the record says.
+//! - **Provider deploy payload.** [`projected_access_with_policy`] projects
+//!   owner-only into every deploy payload this build serializes, for both
+//!   backends.
+//!
+//! Not enforced, deliberately:
+//!
+//! - **A provider deployment that already exists is not reconciled at upgrade
+//!   time.** The projection above only reaches the provider when Desktop builds
+//!   a new payload: create-with-deploy, or an explicit Start/deploy of that
+//!   agent. A record with a `backend_agent_id` stays represented as deployed
+//!   across restarts without redeploying it, so an agent deployed from an
+//!   unmarked build with `anyone` or an allowlist keeps that wider access
+//!   remotely until it is next deployed from a marked build, while this build's
+//!   UI shows its access locked to "Only me". Rolling existing deployments
+//!   under the policy needs a rollout reconciliation pass (redeploy or
+//!   fail-closed on mismatch) that this capability does not attempt.
+//!
+//! ## "owner-only" is owner plus verified same-owner sibling agents
+//!
+//! The harness gate this projection targets admits the human owner *and* every
+//! cryptographically NIP-OA-verified agent that shares that owner (see
+//! `crates/buzz-acp/src/lib.rs`). That is the intended boundary, not an
+//! oversight: an owner's own agents are inside their trust boundary, and Buzz's
+//! built-in Welcome team relies on it, because the lead instructs its teammates
+//! while every teammate is created owner-only (see
+//! `welcomeTeammateHasExpectedAccess` in
+//! `desktop/src/features/onboarding/welcomeGuide.ts`). Read every use of
+//! "owner-only" in this module as `owner ∪ verified same-owner agents`. Buzz's
+//! own user-facing copy for the setting is narrower than that, which is a copy
+//! question tracked outside this module, not a difference in enforcement.
 
 use super::{validate_respond_to_allowlist, ManagedAgentRecord, RespondTo};
 
