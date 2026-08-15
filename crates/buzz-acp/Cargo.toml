@@ -15,6 +15,10 @@ path = "src/lib.rs"
 name = "buzz-acp"
 path = "src/main.rs"
 
+[[bin]]
+name = "buzz-liveness-watcher"
+path = "src/bin/liveness_watcher.rs"
+
 [dependencies]
 # Internal
 buzz-core = { workspace = true }
@@ -79,3 +83,4 @@ nix = { version = "0.31", default-features = false, features = ["signal"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 httparse = "1"
+tempfile = "3"
