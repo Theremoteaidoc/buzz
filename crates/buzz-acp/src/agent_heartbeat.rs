@@ -135,10 +135,88 @@ pub enum MutationKind {
     File,
 }
 
+/// Flatten ACP `rawInput` (`unknown` JSON) into text for mutation heuristics.
+///
+/// Shell tools (Cursor/Codex) typically send `{"command":"…"}` objects, not
+/// bare strings. Treating `rawInput` as string-only missed reply-only turns
+/// whose sole durable write was `buzz messages send` → false `returned_empty`.
+pub fn raw_input_hint(raw: Option<&serde_json::Value>) -> String {
+    let Some(raw) = raw else {
+        return String::new();
+    };
+    match raw {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(map) => {
+            for key in ["command", "cmd", "script", "input", "code", "query"] {
+                if let Some(s) = map.get(key).and_then(|v| v.as_str()) {
+                    if !s.is_empty() {
+                        return s.to_string();
+                    }
+                }
+            }
+            // Last resort: stringify so substring match still sees the command.
+            raw.to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Build the title+input blob passed to [`classify_tool_mutation`].
+pub fn tool_mutation_classify_blob(
+    title: &str,
+    raw: Option<&serde_json::Value>,
+    content_text: &str,
+) -> String {
+    let hint = raw_input_hint(raw);
+    let hint = if hint.is_empty() {
+        content_text
+    } else {
+        hint.as_str()
+    };
+    if hint.is_empty() {
+        title.to_string()
+    } else if title.is_empty() {
+        hint.to_string()
+    } else {
+        format!("{title} {hint}")
+    }
+}
+
+/// Default founder-readable status path (outside systemd PrivateTmp).
+///
+/// Units set `PrivateTmp=true`, so `/tmp/buzz-acp-heartbeat-*.json` is invisible
+/// to the founder and other seats. Default is under the shared home tree
+/// (`ReadWritePaths` already covers `/opt/buzz/agents/home`). Override with
+/// `BUZZ_ACP_HEARTBEAT_STATUS_PATH`. Deploy must ensure
+/// `/opt/buzz/agents/home/shared/heartbeat/` exists and is writable by seats.
+pub fn default_status_path(agent_label: &str) -> PathBuf {
+    let safe: String = agent_label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe = if safe.is_empty() {
+        "agent".to_string()
+    } else {
+        safe
+    };
+    PathBuf::from(format!(
+        "/opt/buzz/agents/home/shared/heartbeat/{safe}.json"
+    ))
+}
+
 /// Heuristic: does this ACP tool_call title/kind count as a durable write?
 ///
 /// `agent_message_chunk` is intentionally NOT a mutation — that is the ACP
-/// stream to the observer, not a Buzz publish or filesystem write.
+/// stream to the observer, not a Buzz publish or filesystem write. A real
+/// Buzz publish is detected when the tool input contains `buzz messages send`
+/// (see [`raw_input_hint`] for object-shaped `rawInput`).
 ///
 /// Over-counts progress (fail-safe): shell redirects / `tee` / scratch writes
 /// may count as File. Prefer false "healthy" over false `stalled`.
@@ -987,6 +1065,68 @@ mod tests {
         );
         assert_eq!(classify_tool_mutation("Read", "read"), None);
         assert_eq!(classify_tool_mutation("agent_message_chunk", "stream"), None);
+    }
+
+    /// Object-shaped ACP rawInput (the common Cursor/Codex Shell shape) must
+    /// surface the command so `buzz messages send` counts as a Message.
+    #[test]
+    fn raw_input_object_command_classifies_as_message() {
+        let raw = serde_json::json!({
+            "command": "buzz messages send --channel abc --content 'hi'"
+        });
+        let blob = tool_mutation_classify_blob("Shell", Some(&raw), "");
+        assert!(
+            blob.contains("buzz messages send"),
+            "blob must include command text, got {blob}"
+        );
+        assert_eq!(
+            classify_tool_mutation(&blob, "shell"),
+            Some(MutationKind::Message)
+        );
+        // String rawInput still works.
+        let raw_str = serde_json::json!("buzz messages send --reply-to x --content y");
+        let blob_str = tool_mutation_classify_blob("Shell", Some(&raw_str), "");
+        assert_eq!(
+            classify_tool_mutation(&blob_str, "execute"),
+            Some(MutationKind::Message)
+        );
+    }
+
+    /// Mirror of `turn_outcome_returned_empty`: a reply-only turn (message,
+    /// no file) must classify `ok`, never `returned_empty`.
+    #[test]
+    fn turn_outcome_reply_only_is_ok_not_returned_empty() {
+        let raw = serde_json::json!({
+            "command": "printf 'ack' | buzz messages send --channel c --content -"
+        });
+        let blob = tool_mutation_classify_blob("Shell", Some(&raw), "");
+        let mut progress = TurnProgress::default();
+        let kind = classify_tool_mutation(&blob, "shell").expect("publish is Message");
+        progress.record_mutation(kind, "tool_call:Shell", t0());
+        assert!(progress.produced_message);
+        assert!(!progress.produced_file);
+        assert_eq!(
+            classify_ok_turn_outcome(progress.produced_message, progress.produced_file),
+            TurnOutcomeLabel::Ok
+        );
+        assert_ne!(
+            classify_ok_turn_outcome(progress.produced_message, progress.produced_file),
+            TurnOutcomeLabel::ReturnedEmpty
+        );
+    }
+
+    #[test]
+    fn default_status_path_is_shared_home_not_tmp() {
+        let path = default_status_path("FirstMate");
+        let s = path.to_string_lossy();
+        assert!(
+            s.starts_with("/opt/buzz/agents/home/shared/heartbeat/"),
+            "must be under shared/heartbeat (outside PrivateTmp), got {s}"
+        );
+        assert!(!s.contains("/tmp/"), "must not use PrivateTmp /tmp");
+        assert!(s.ends_with("FirstMate.json"));
+        let ugly = default_status_path("buzz-agent@codex/../x");
+        assert!(!ugly.to_string_lossy().contains(".."));
     }
 
     #[test]

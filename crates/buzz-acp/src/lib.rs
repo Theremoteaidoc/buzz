@@ -15,6 +15,7 @@ mod usage;
 
 pub use agent_heartbeat::{
     classify_identity, classify_ok_turn_outcome, classify_tool_mutation, dead_after_for,
+    default_status_path,
     HeartbeatRegistry, HeartbeatState, IdentityClass, MidTurnMutationSink, MutationKind,
     TurnOutcomeLabel, TurnProgress, HEARTBEAT_CADENCE_DEFAULT, HEARTBEAT_CADENCE_MAX,
     HEARTBEAT_CADENCE_MIN, STALL_AFTER_DEFAULT,
@@ -1654,12 +1655,13 @@ async fn tokio_main() -> Result<()> {
     if let Ok(path) = std::env::var("BUZZ_ACP_HEARTBEAT_STATUS_PATH") {
         if !path.trim().is_empty() {
             agent_hb.set_status_path(path);
+        } else {
+            // Empty override → shared-home default (not PrivateTmp /tmp).
+            agent_hb.set_status_path(default_status_path(&agent_label));
         }
     } else {
-        agent_hb.set_status_path(format!(
-            "/tmp/buzz-acp-heartbeat-{}.json",
-            &pubkey_hex[..pubkey_hex.len().min(16)]
-        ));
+        // Outside systemd PrivateTmp so the founder can read all seats.
+        agent_hb.set_status_path(default_status_path(&agent_label));
     }
     let has_agent_service = std::env::var_os("BUZZ_AGENT_SERVICE").is_some()
         || std::path::Path::new(&format!("/etc/systemd/system/buzz-agent@{}.service", agent_label))
