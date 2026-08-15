@@ -1,0 +1,24 @@
+[Unit]
+Description=Buzz out-of-process agent liveness watcher (WO #135, host-local)
+Documentation=file:///opt/buzz/liveness-watcher/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=buzzagent
+Group=buzzagent
+# Per-host heartbeat dir — not shared across boxes. This instance is
+# authoritative only for seats active on THIS host.
+Environment=BUZZ_LIVENESS_HEARTBEAT_DIR=/opt/buzz/agents/home/shared/heartbeat
+ExecStart=/opt/buzz/bin/buzz-liveness-watcher --pretty
+# Exit 1 = alarms present (dead/unknown). Timer still reschedules.
+SuccessExitStatus=0 1
+# Fail-closed refuse (exit 2) is a real unit failure.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/opt/buzz/agents/home/shared/heartbeat
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
