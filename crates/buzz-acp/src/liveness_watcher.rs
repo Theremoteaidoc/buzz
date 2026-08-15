@@ -1,15 +1,25 @@
-//! Out-of-process agent liveness watcher (WO #135).
+//! Out-of-process agent liveness watcher (WO #135 / #145).
 //!
 //! Consumes heartbeat status-file **mtime** from outside any agent's event
-//! loop. Declares `dead` when a file goes silent past [`dead_after`], which is
-//! strictly greater than [`crate::agent_heartbeat::STALL_AFTER_DEFAULT`].
+//! loop, **corroborated with systemd unit ActiveState** before any `Dead`
+//! verdict (WO #145). A silent file alone is not death — idle seats write no
+//! heartbeat until they have a turn.
+//!
+//! ## Verdict taxonomy (WO #145)
+//!
+//! - fresh mtime → [`ExternalLiveness::Healthy`]
+//! - stale mtime + unit inactive/failed → [`ExternalLiveness::Dead`]
+//! - stale mtime + unit active → [`ExternalLiveness::Stale`] (never `Dead`)
+//! - undeterminable input (missing/future mtime, or unknown unit state) →
+//!   [`ExternalLiveness::Unknown`]
 //!
 //! ## Fail-closed roster (merge-gate)
 //!
 //! Expected seats come from **systemd ground truth** (`buzz-agent@*` plus
-//! `buzz-orchestrator.service`), never from listing the heartbeat directory.
-//! An active unit with no status file is loud [`ExternalLiveness::Unknown`] —
-//! never silently healthy. Absence of a file is not evidence the seat is fine.
+//! `buzz-orchestrator.service` via `list-units --all`), never from listing the
+//! heartbeat directory. Inactive/failed units stay on the roster so true-dead
+//! seats remain visible. An active unit with no status file is loud
+//! [`ExternalLiveness::Unknown`] — never silently healthy.
 //!
 //! ## Coverage honesty
 //!
@@ -21,7 +31,7 @@
 //!
 //! This module must never call or import the registry's alive-refresh helper
 //! (the in-process tick that masked wedge detection on #133). Wedge detection
-//! here is mtime-only, from outside the agent loop.
+//! here is mtime + unit state, from outside the agent loop.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -43,15 +53,29 @@ pub fn watcher_dead_after() -> Duration {
     dead_after_for(STALL_AFTER_DEFAULT, HEARTBEAT_CADENCE_DEFAULT)
 }
 
-/// Verdict for one active seat on this host.
+/// Systemd `ActiveState` class used to corroborate heartbeat mtime (WO #145).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnitState {
+    /// `ActiveState=active` (or `reloading`) — process side is up.
+    Active,
+    /// `ActiveState=inactive` or `failed` — positive evidence the unit is down.
+    InactiveOrFailed,
+    /// Could not determine (missing column, activating/deactivating, unknown).
+    Undetermined,
+}
+
+/// Verdict for one rostered seat on this host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalLiveness {
     /// Status file mtime is within `dead_after`.
     Healthy { age_secs: u64 },
-    /// Status file exists but mtime silence exceeded `dead_after`.
+    /// Stale mtime **and** unit inactive/failed — corroborated death.
     Dead { age_secs: u64 },
-    /// Active systemd unit with no status file at all — loud alarm.
+    /// Stale mtime **but** unit still active — idle/wedged, never `dead`.
+    Stale { age_secs: u64 },
+    /// Undeterminable input (missing/future mtime, or unknown unit state).
     Unknown,
 }
 
@@ -60,10 +84,13 @@ impl ExternalLiveness {
         match self {
             Self::Healthy { .. } => "healthy",
             Self::Dead { .. } => "dead",
+            Self::Stale { .. } => "stale",
             Self::Unknown => "unknown",
         }
     }
 
+    /// Pageable alarms only. `Stale` is reported but does not exit-1 — idle
+    /// seats are the normal state of most agents most of the time.
     pub fn is_alarm(&self) -> bool {
         matches!(self, Self::Dead { .. } | Self::Unknown)
     }
@@ -116,13 +143,17 @@ impl WatcherReport {
 pub struct RosterSeat {
     pub unit: String,
     pub seat: String,
+    /// ActiveState class from `systemctl list-units` (WO #145 corroboration).
+    pub unit_state: UnitState,
 }
 
 /// Map a systemd unit name to a roster seat, or `None` if not a watched unit.
 ///
 /// Catches `buzz-agent@*` **and** `buzz-orchestrator.service` explicitly
 /// (orchestrator is not under the template glob).
-pub fn parse_unit_to_seat(unit: &str) -> Option<RosterSeat> {
+///
+/// `unit_state` is the ActiveState class from the same list-units line.
+pub fn parse_unit_to_seat(unit: &str, unit_state: UnitState) -> Option<RosterSeat> {
     let unit = unit.trim();
     if unit.is_empty() {
         return None;
@@ -133,6 +164,7 @@ pub fn parse_unit_to_seat(unit: &str) -> Option<RosterSeat> {
         return Some(RosterSeat {
             unit: format_unit_name(bare),
             seat: "orchestrator".to_string(),
+            unit_state,
         });
     }
 
@@ -144,6 +176,7 @@ pub fn parse_unit_to_seat(unit: &str) -> Option<RosterSeat> {
         return Some(RosterSeat {
             unit: format_unit_name(bare),
             seat: seat.to_ascii_lowercase(),
+            unit_state,
         });
     }
 
@@ -158,10 +191,23 @@ fn format_unit_name(bare: &str) -> String {
     }
 }
 
+/// Classify systemd `ActiveState` token for corroboration.
+///
+/// - `active` / `reloading` → [`UnitState::Active`]
+/// - `inactive` / `failed` → [`UnitState::InactiveOrFailed`]
+/// - anything else (including empty) → [`UnitState::Undetermined`]
+pub fn parse_unit_active_state(active_token: &str) -> UnitState {
+    match active_token.trim().to_ascii_lowercase().as_str() {
+        "active" | "reloading" => UnitState::Active,
+        "inactive" | "failed" => UnitState::InactiveOrFailed,
+        _ => UnitState::Undetermined,
+    }
+}
+
 /// Parse `systemctl list-units --no-legend --plain` style lines into roster seats.
 ///
-/// Only lines that name an active buzz agent / orchestrator unit are kept.
-/// Directory listings are never consulted here.
+/// Includes inactive/failed units (`list-units --all`). Directory listings are
+/// never consulted here.
 pub fn parse_systemctl_roster(stdout: &str) -> Vec<RosterSeat> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -170,8 +216,16 @@ pub fn parse_systemctl_roster(stdout: &str) -> Vec<RosterSeat> {
         if line.is_empty() || line.starts_with("UNIT") {
             continue;
         }
-        let unit_token = line.split_whitespace().next().unwrap_or("");
-        if let Some(seat) = parse_unit_to_seat(unit_token) {
+        let mut cols = line.split_whitespace();
+        let unit_token = cols.next().unwrap_or("");
+        let _load = cols.next();
+        let active_token = cols.next().unwrap_or("");
+        let unit_state = if active_token.is_empty() {
+            UnitState::Undetermined
+        } else {
+            parse_unit_active_state(active_token)
+        };
+        if let Some(seat) = parse_unit_to_seat(unit_token, unit_state) {
             if seen.insert(seat.unit.clone()) {
                 out.push(seat);
             }
@@ -181,13 +235,18 @@ pub fn parse_systemctl_roster(stdout: &str) -> Vec<RosterSeat> {
     out
 }
 
-/// Evaluate one seat given optional status-file mtime (injectable for tests).
+/// Evaluate one seat given optional status-file mtime **and** unit ActiveState.
 ///
 /// `status_mtime == None` means the file is absent → [`ExternalLiveness::Unknown`].
 /// A future mtime (clock skew / `touch -d`) is also [`ExternalLiveness::Unknown`] —
 /// age is undeterminable, never fail-open to Healthy.
+///
+/// **WO #145:** `Dead` requires stale mtime **and** [`UnitState::InactiveOrFailed`].
+/// Stale mtime with an active unit is [`ExternalLiveness::Stale`], never `Dead`.
+/// Undetermined unit state fails closed to `Unknown`, never `Dead`.
 pub fn evaluate_mtime(
     status_mtime: Option<SystemTime>,
+    unit_state: UnitState,
     now: SystemTime,
     dead_after: Duration,
 ) -> ExternalLiveness {
@@ -199,10 +258,14 @@ pub fn evaluate_mtime(
         return ExternalLiveness::Unknown;
     };
     let age_secs = age.as_secs();
-    if age > dead_after {
-        ExternalLiveness::Dead { age_secs }
-    } else {
-        ExternalLiveness::Healthy { age_secs }
+    if age <= dead_after {
+        return ExternalLiveness::Healthy { age_secs };
+    }
+    // Stale mtime — corroborate with unit before asserting death.
+    match unit_state {
+        UnitState::InactiveOrFailed => ExternalLiveness::Dead { age_secs },
+        UnitState::Active => ExternalLiveness::Stale { age_secs },
+        UnitState::Undetermined => ExternalLiveness::Unknown,
     }
 }
 
@@ -268,7 +331,7 @@ pub fn build_report(
     for r in roster {
         let path = resolve_status_path(heartbeat_dir, &r.seat);
         let mtime = path.as_ref().and_then(|p| read_mtime(p));
-        let verdict = evaluate_mtime(mtime, now, dead_after);
+        let verdict = evaluate_mtime(mtime, r.unit_state, now, dead_after);
         let alarm = verdict.is_alarm();
         seats.push(SeatObservation {
             unit: r.unit.clone(),
@@ -297,15 +360,19 @@ pub fn build_report(
     }
 }
 
-/// Discover active buzz seats via systemd. Fail-closed: command failure → error.
+/// Discover buzz seats via systemd, including inactive/failed (WO #145).
+///
+/// Uses `list-units --all` so a unit that has died stays on the roster and can
+/// still be reported `Dead`. Fail-closed: command failure → error.
 pub fn discover_systemd_roster() -> std::io::Result<Vec<RosterSeat>> {
     // Explicitly name orchestrator so a naive buzz-agent@* glob cannot miss it.
+    // `--all` keeps inactive/failed units visible (active-only inverted coverage).
     let output = Command::new("systemctl")
         .args([
             "list-units",
             "buzz-agent@*",
             "buzz-orchestrator.service",
-            "--state=active",
+            "--all",
             "--no-legend",
             "--plain",
             "--no-pager",
@@ -367,6 +434,14 @@ mod tests {
         UNIX_EPOCH + Duration::from_secs(1_700_000_000)
     }
 
+    fn seat(unit: &str, name: &str, state: UnitState) -> RosterSeat {
+        RosterSeat {
+            unit: unit.into(),
+            seat: name.into(),
+            unit_state: state,
+        }
+    }
+
     #[test]
     fn dead_after_strictly_exceeds_stall() {
         let dead = watcher_dead_after();
@@ -376,51 +451,88 @@ mod tests {
 
     #[test]
     fn parse_unit_catches_agent_and_orchestrator() {
-        let a = parse_unit_to_seat("buzz-agent@codex.service").unwrap();
+        let a = parse_unit_to_seat("buzz-agent@codex.service", UnitState::Active).unwrap();
         assert_eq!(a.seat, "codex");
         assert_eq!(a.unit, "buzz-agent@codex.service");
+        assert_eq!(a.unit_state, UnitState::Active);
 
-        let o = parse_unit_to_seat("buzz-orchestrator.service").unwrap();
+        let o = parse_unit_to_seat("buzz-orchestrator.service", UnitState::InactiveOrFailed)
+            .unwrap();
         assert_eq!(o.seat, "orchestrator");
         assert_eq!(o.unit, "buzz-orchestrator.service");
+        assert_eq!(o.unit_state, UnitState::InactiveOrFailed);
 
-        assert!(parse_unit_to_seat("sshd.service").is_none());
-        assert!(parse_unit_to_seat("buzz-agent@.service").is_none());
+        assert!(parse_unit_to_seat("sshd.service", UnitState::Active).is_none());
+        assert!(parse_unit_to_seat("buzz-agent@.service", UnitState::Active).is_none());
     }
 
     #[test]
-    fn roster_from_systemctl_not_from_directory_listing() {
-        // Naive glob of buzz-agent@* alone would miss orchestrator — parser must keep it.
+    fn roster_includes_inactive_and_failed_units() {
+        // --all output: inactive/failed must stay on the roster (WO #145).
         let stdout = "\
 buzz-agent@codex.service          loaded active running Buzz headless agent persona codex
-buzz-agent@hermes.service         loaded active running Buzz headless agent persona hermes
+buzz-agent@hermes.service         loaded failed failed Buzz headless agent persona hermes
+buzz-agent@firstmate.service      loaded inactive dead Buzz headless agent persona firstmate
 buzz-orchestrator.service         loaded active running Buzz orchestrator
 ";
         let roster = parse_systemctl_roster(stdout);
-        let seats: Vec<_> = roster.iter().map(|r| r.seat.as_str()).collect();
-        assert!(seats.contains(&"codex"));
-        assert!(seats.contains(&"hermes"));
-        assert!(
-            seats.contains(&"orchestrator"),
-            "orchestrator must be in roster even though it is not buzz-agent@*: {seats:?}"
+        let by_seat: std::collections::HashMap<_, _> = roster
+            .iter()
+            .map(|r| (r.seat.as_str(), r.unit_state))
+            .collect();
+        assert_eq!(by_seat.get("codex"), Some(&UnitState::Active));
+        assert_eq!(by_seat.get("hermes"), Some(&UnitState::InactiveOrFailed));
+        assert_eq!(
+            by_seat.get("firstmate"),
+            Some(&UnitState::InactiveOrFailed)
         );
+        assert_eq!(by_seat.get("orchestrator"), Some(&UnitState::Active));
+        assert_eq!(roster.len(), 4, "inactive/failed must not vanish: {roster:?}");
     }
 
     #[test]
     fn missing_status_file_is_loud_unknown_never_healthy() {
-        let v = evaluate_mtime(None, t0(), Duration::from_secs(225));
+        let v = evaluate_mtime(None, UnitState::Active, t0(), Duration::from_secs(225));
         assert_eq!(v, ExternalLiveness::Unknown);
         assert_eq!(v.as_str(), "unknown");
         assert!(v.is_alarm());
     }
 
     #[test]
-    fn starved_mtime_past_dead_after_is_dead() {
+    fn starved_mtime_inactive_unit_is_dead() {
         let dead_after = Duration::from_secs(225);
         let mtime = t0();
         let now = t0() + dead_after + Duration::from_secs(1);
-        let v = evaluate_mtime(Some(mtime), now, dead_after);
+        let v = evaluate_mtime(
+            Some(mtime),
+            UnitState::InactiveOrFailed,
+            now,
+            dead_after,
+        );
         assert_eq!(v, ExternalLiveness::Dead { age_secs: 226 });
+        assert!(v.is_alarm());
+    }
+
+    #[test]
+    fn starved_mtime_active_unit_is_stale_never_dead() {
+        // THE #145 regression: idle-but-healthy seats write no heartbeat.
+        let dead_after = Duration::from_secs(225);
+        let mtime = t0();
+        let now = t0() + dead_after + Duration::from_secs(1);
+        let v = evaluate_mtime(Some(mtime), UnitState::Active, now, dead_after);
+        assert_eq!(v, ExternalLiveness::Stale { age_secs: 226 });
+        assert_ne!(v.as_str(), "dead");
+        assert!(!v.is_alarm(), "Stale must not page like Dead");
+    }
+
+    #[test]
+    fn starved_mtime_undetermined_unit_is_unknown_not_dead() {
+        let dead_after = Duration::from_secs(225);
+        let mtime = t0();
+        let now = t0() + dead_after + Duration::from_secs(1);
+        let v = evaluate_mtime(Some(mtime), UnitState::Undetermined, now, dead_after);
+        assert_eq!(v, ExternalLiveness::Unknown);
+        assert_ne!(v.as_str(), "dead");
         assert!(v.is_alarm());
     }
 
@@ -429,7 +541,7 @@ buzz-orchestrator.service         loaded active running Buzz orchestrator
         let dead_after = Duration::from_secs(225);
         let mtime = t0();
         let now = t0() + Duration::from_secs(100);
-        let v = evaluate_mtime(Some(mtime), now, dead_after);
+        let v = evaluate_mtime(Some(mtime), UnitState::Active, now, dead_after);
         assert_eq!(v, ExternalLiveness::Healthy { age_secs: 100 });
         assert!(!v.is_alarm());
     }
@@ -440,7 +552,7 @@ buzz-orchestrator.service         loaded active running Buzz orchestrator
         let dead_after = Duration::from_secs(225);
         let now = t0();
         let mtime = t0() + Duration::from_secs(60);
-        let v = evaluate_mtime(Some(mtime), now, dead_after);
+        let v = evaluate_mtime(Some(mtime), UnitState::Active, now, dead_after);
         assert_eq!(v, ExternalLiveness::Unknown);
         assert_ne!(v.as_str(), "healthy");
         assert!(v.is_alarm());
@@ -450,10 +562,11 @@ buzz-orchestrator.service         loaded active running Buzz orchestrator
     fn active_unit_without_heartbeat_file_alarms() {
         let dir = tempfile::tempdir().unwrap();
         // Roster has hermes; directory is empty — must alarm unknown.
-        let roster = vec![RosterSeat {
-            unit: "buzz-agent@hermes.service".into(),
-            seat: "hermes".into(),
-        }];
+        let roster = vec![seat(
+            "buzz-agent@hermes.service",
+            "hermes",
+            UnitState::Active,
+        )];
         let report = build_report(
             "seascope-ci-1",
             dir.path(),
@@ -479,17 +592,9 @@ buzz-orchestrator.service         loaded active running Buzz orchestrator
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Codex.json");
         fs::write(&path, b"[]").unwrap();
-        // Pin mtime via filetime would need extra dep; evaluate via build after touch is enough
-        // for coverage shape. Fresh write → healthy under large dead_after.
         let roster = vec![
-            RosterSeat {
-                unit: "buzz-agent@codex.service".into(),
-                seat: "codex".into(),
-            },
-            RosterSeat {
-                unit: "buzz-agent@cursor.service".into(),
-                seat: "cursor".into(),
-            },
+            seat("buzz-agent@codex.service", "codex", UnitState::Active),
+            seat("buzz-agent@cursor.service", "cursor", UnitState::Active),
         ];
         let report = build_report(
             "seascope-ci-1",
@@ -504,7 +609,6 @@ buzz-orchestrator.service         loaded active running Buzz orchestrator
             report.coverage.authoritative_seats,
             vec!["codex".to_string(), "cursor".to_string()]
         );
-        // Extra files in dir must not expand roster.
         fs::write(dir.path().join("Claude.json"), b"[]").unwrap();
         let report2 = build_report(
             "seascope-ci-1",
@@ -522,21 +626,21 @@ buzz-orchestrator.service         loaded active running Buzz orchestrator
     }
 
     #[test]
-    fn starved_file_on_disk_declares_dead_in_report() {
+    fn starved_file_inactive_unit_declares_dead_in_report() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("codex.json");
         fs::write(&path, b"[]").unwrap();
-        // Pin mtime to an old wall time so the probe does not wait real seconds.
         let status = Command::new("touch")
             .args(["-d", "1970-01-01 00:00:01 UTC", path.to_str().unwrap()])
             .status()
             .expect("touch");
         assert!(status.success(), "touch -d must succeed to starve mtime");
 
-        let roster = vec![RosterSeat {
-            unit: "buzz-agent@codex.service".into(),
-            seat: "codex".into(),
-        }];
+        let roster = vec![seat(
+            "buzz-agent@codex.service",
+            "codex",
+            UnitState::InactiveOrFailed,
+        )];
         let report = build_report(
             "seascope-ci-1",
             dir.path(),
@@ -547,10 +651,43 @@ buzz-orchestrator.service         loaded active running Buzz orchestrator
         assert_eq!(report.seats.len(), 1);
         assert!(
             matches!(report.seats[0].verdict, ExternalLiveness::Dead { .. }),
-            "starved mtime must be dead, got {:?}",
+            "starved+inactive must be dead, got {:?}",
             report.seats[0].verdict
         );
         assert!(report.seats[0].alarm);
         assert_eq!(report.alarm_count, 1);
+    }
+
+    #[test]
+    fn starved_file_active_unit_is_stale_not_dead_in_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codex.json");
+        fs::write(&path, b"[]").unwrap();
+        let status = Command::new("touch")
+            .args(["-d", "1970-01-01 00:00:01 UTC", path.to_str().unwrap()])
+            .status()
+            .expect("touch");
+        assert!(status.success());
+
+        let roster = vec![seat(
+            "buzz-agent@codex.service",
+            "codex",
+            UnitState::Active,
+        )];
+        let report = build_report(
+            "seascope-ci-1",
+            dir.path(),
+            &roster,
+            SystemTime::now(),
+            Duration::from_secs(225),
+        );
+        assert_eq!(report.seats.len(), 1);
+        assert!(
+            matches!(report.seats[0].verdict, ExternalLiveness::Stale { .. }),
+            "active+starved must be Stale, got {:?}",
+            report.seats[0].verdict
+        );
+        assert!(!report.seats[0].alarm);
+        assert_eq!(report.alarm_count, 0);
     }
 }

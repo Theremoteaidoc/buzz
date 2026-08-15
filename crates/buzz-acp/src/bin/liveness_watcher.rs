@@ -1,7 +1,8 @@
 //! Out-of-process liveness watcher binary (WO #135).
 //!
 //! One-shot probe: reads systemd roster + status-file mtimes, prints JSON,
-//! exits non-zero when any seat alarms (`dead` or `unknown`).
+//! Exits non-zero when any seat alarms (`dead` or `unknown`).
+//! `stale` (active unit + starved mtime) is reported but does not exit-1.
 //!
 //! Never performs in-process alive-refresh — wedge detection stays outside the agent loop.
 

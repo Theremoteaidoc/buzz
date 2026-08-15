@@ -22,9 +22,9 @@ pub use agent_heartbeat::{
     HEARTBEAT_CADENCE_MIN, STALL_AFTER_DEFAULT,
 };
 pub use liveness_watcher::{
-    build_report, evaluate_mtime, parse_systemctl_roster, parse_unit_to_seat, run_probe,
-    watcher_dead_after, CoverageDeclaration, ExternalLiveness, RosterSeat, SeatObservation,
-    WatcherReport, DEFAULT_HEARTBEAT_DIR,
+    build_report, evaluate_mtime, parse_systemctl_roster, parse_unit_active_state,
+    parse_unit_to_seat, run_probe, watcher_dead_after, CoverageDeclaration, ExternalLiveness,
+    RosterSeat, SeatObservation, UnitState, WatcherReport, DEFAULT_HEARTBEAT_DIR,
 };
 pub use usage::TurnUsage;
 
