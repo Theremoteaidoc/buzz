@@ -7,6 +7,12 @@
 //! Identity is three-way: agent seats (full model), cron/notify keys (excluded),
 //! and human-backed sessions (visible, never stalled/dead as agents).
 //!
+//! ## Startup emit (WO #148)
+//!
+//! [`HeartbeatRegistry::emit_initial`] writes the status file at process boot
+//! (state `agent_initialized`) so a running seat never appears file-less to
+//! the external liveness watcher before its first turn.
+//!
 //! ## Death detection honesty (B2)
 //!
 //! In-process `tick()` can declare `dead` only when `last_seen_at` goes silent
@@ -69,6 +75,8 @@ pub enum IdentityClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HeartbeatState {
+    /// Freshly-started seat, before any turn (WO #148 startup emit).
+    AgentInitialized,
     Idle,
     Claimed,
     Running,
@@ -87,6 +95,7 @@ pub enum HeartbeatState {
 impl HeartbeatState {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::AgentInitialized => "agent_initialized",
             Self::Idle => "idle",
             Self::Claimed => "claimed",
             Self::Running => "running",
@@ -470,6 +479,22 @@ impl HeartbeatRegistry {
             });
     }
 
+    /// Write the initial status snapshot before any turn (WO #148).
+    ///
+    /// `register_identity` alone does not touch the status path — without this
+    /// call a freshly-booted seat has no file, and the external liveness
+    /// watcher alarms `unknown` until the first turn. Emits state
+    /// [`HeartbeatState::AgentInitialized`] on the configured status path.
+    pub fn emit_initial(&mut self, agent: &str, now: SystemTime) -> Option<HeartbeatPayload> {
+        self.set_state(
+            agent,
+            HeartbeatState::AgentInitialized,
+            "agent_initialized",
+            None,
+            now,
+        )
+    }
+
     pub fn record_dropped_event(&mut self, reason: impl Into<String>) {
         self.drops.record(reason);
     }
@@ -724,11 +749,14 @@ impl HeartbeatRegistry {
                 | HeartbeatState::Claimed
                 | HeartbeatState::Blocked
                 | HeartbeatState::Returned
-                | HeartbeatState::Idle => {
+                | HeartbeatState::Idle
+                | HeartbeatState::AgentInitialized => {
                     if seat.last_mutation_at.is_some()
                         || matches!(
                             seat.state,
-                            HeartbeatState::Idle | HeartbeatState::Returned
+                            HeartbeatState::Idle
+                                | HeartbeatState::Returned
+                                | HeartbeatState::AgentInitialized
                         )
                     {
                         Some("healthy")
@@ -1135,5 +1163,88 @@ mod tests {
         assert_eq!(HEARTBEAT_CADENCE_MAX, Duration::from_secs(90));
         assert!(HEARTBEAT_CADENCE_DEFAULT >= HEARTBEAT_CADENCE_MIN);
         assert!(HEARTBEAT_CADENCE_DEFAULT <= HEARTBEAT_CADENCE_MAX);
+    }
+
+    /// WO #148 tripwire: a freshly-started seat writes a status file *before*
+    /// any inbound turn is dispatched. `register_identity` alone must not
+    /// write; `emit_initial` must produce the watcher-shaped snapshot.
+    #[test]
+    fn startup_emit_writes_status_file_before_any_turn() {
+        let dir = std::env::temp_dir().join(format!(
+            "buzz-acp-wo148-hb-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp heartbeat dir");
+        let status_path = dir.join("codex.json");
+
+        let mut reg = HeartbeatRegistry::with_defaults();
+        reg.set_status_path(&status_path);
+        reg.register_identity("codex", IdentityClass::AgentSeat, t0());
+
+        // Precondition: register alone leaves no file (the #148 bug class).
+        assert!(
+            !status_path.exists(),
+            "register_identity must not write the status file"
+        );
+
+        let payload = reg
+            .emit_initial("codex", t0())
+            .expect("startup emit must produce a payload");
+        assert_eq!(payload.state, HeartbeatState::AgentInitialized);
+        assert_eq!(payload.state.as_str(), "agent_initialized");
+        assert_eq!(payload.phase, "agent_initialized");
+        assert!(payload.turn_id.is_none(), "startup emit has no turn");
+        assert_eq!(payload.agent, "codex");
+        assert_eq!(payload.dropped_events, 0);
+        assert_eq!(reg.liveness_label("codex", t0()), Some("healthy"));
+
+        // File must exist before any Claimed/Running transition.
+        assert!(
+            status_path.is_file(),
+            "status file must exist before any turn"
+        );
+        let body = std::fs::read_to_string(&status_path).expect("read status");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("status JSON");
+        let seat = parsed
+            .as_array()
+            .and_then(|a| a.first())
+            .expect("snapshot array with one seat");
+        assert_eq!(seat["agent"], "codex");
+        assert_eq!(seat["state"], "agent_initialized");
+        assert!(seat["turn_id"].is_null());
+        assert_eq!(seat["elapsed_in_phase_secs"], 0);
+        assert_eq!(seat["dropped_events"], 0);
+
+        // Still no turn dispatched — advancing to Claimed is a later step.
+        assert!(
+            !matches!(
+                reg.payload_for("codex", t0()).map(|p| p.state),
+                Some(HeartbeatState::Claimed | HeartbeatState::Running)
+            ),
+            "must not have entered a turn state"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cron/notify keys stay excluded: emit_initial must not write for them.
+    #[test]
+    fn startup_emit_skips_cron_notify_identity() {
+        let dir = std::env::temp_dir().join(format!(
+            "buzz-acp-wo148-cron-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let status_path = dir.join("cron.json");
+
+        let mut reg = HeartbeatRegistry::with_defaults();
+        reg.set_status_path(&status_path);
+        reg.register_identity("cron.key", IdentityClass::CronNotify, t0());
+        assert!(reg.emit_initial("cron.key", t0()).is_none());
+        assert!(!status_path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

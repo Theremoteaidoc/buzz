@@ -1672,11 +1672,15 @@ async fn tokio_main() -> Result<()> {
     let has_agent_service = std::env::var_os("BUZZ_AGENT_SERVICE").is_some()
         || std::path::Path::new(&format!("/etc/systemd/system/buzz-agent@{}.service", agent_label))
             .exists();
+    let boot_at = std::time::SystemTime::now();
     agent_hb.register_identity(
         &agent_label,
         classify_identity(&agent_label, has_agent_service),
-        std::time::SystemTime::now(),
+        boot_at,
     );
+    // WO #148 — write status file before any turn so the external watcher
+    // never sees a running unit with no file (cry-wolf on idle seats).
+    let _ = agent_hb.emit_initial(&agent_label, boot_at);
     let mut agent_hb_ticker = tokio::time::interval(HEARTBEAT_CADENCE_DEFAULT);
 
     let mut presence_heartbeat = if config.presence_enabled {
