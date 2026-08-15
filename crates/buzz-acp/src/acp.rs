@@ -908,6 +908,54 @@ impl AcpClient {
         self.mutation_sink = Some(sink);
     }
 
+    /// Classify a tool_call / tool_call_update as a durable Message/File write.
+    ///
+    /// `rawInput` is ACP `unknown` — often an object `{"command":"…"}` — so we
+    /// flatten it via [`crate::agent_heartbeat::tool_mutation_classify_blob`].
+    fn note_tool_call_mutation(
+        &mut self,
+        update: &serde_json::Value,
+        title: &str,
+        kind: &str,
+    ) {
+        let content_text = update
+            .pointer("/content/0/text")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                update
+                    .pointer("/content/0/content/text")
+                    .and_then(|v| v.as_str())
+            })
+            .unwrap_or("");
+        let classify_blob = crate::agent_heartbeat::tool_mutation_classify_blob(
+            title,
+            update.get("rawInput"),
+            content_text,
+        );
+        // Skip no-op updates that carry neither title nor input (status-only).
+        if classify_blob.is_empty()
+            || (classify_blob == "tool" && update.get("rawInput").is_none() && content_text.is_empty())
+        {
+            return;
+        }
+        if let Some(mutation) =
+            crate::agent_heartbeat::classify_tool_mutation(&classify_blob, kind)
+        {
+            let action = format!("tool_call:{title}");
+            let now = std::time::SystemTime::now();
+            self.turn_progress
+                .record_mutation(mutation, action.clone(), now);
+            // B1: also note on the shared sink so the registry's
+            // last_mutation_at advances mid-turn (not only at turn end).
+            if let Some(sink) = self.mutation_sink.as_ref() {
+                sink.note(mutation, action, now);
+            }
+        } else if title != "tool" && title != "unknown" {
+            self.turn_progress
+                .note_action(format!("tool_call:{title}"));
+        }
+    }
+
     /// Install a per-turn steer request channel for goose-native
     /// non-cancelling mid-turn delivery.
     ///
@@ -1775,35 +1823,8 @@ impl AcpClient {
                     .get("kind")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                // Prefer rawInput/command text when present so shell
-                // `buzz messages send` is classified even if title is generic.
-                let raw_hint = update
-                    .get("rawInput")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| update.pointer("/content/0/text").and_then(|v| v.as_str()))
-                    .unwrap_or("");
-                let classify_blob = if raw_hint.is_empty() {
-                    title.to_string()
-                } else {
-                    format!("{title} {raw_hint}")
-                };
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
-                if let Some(mutation) =
-                    crate::agent_heartbeat::classify_tool_mutation(&classify_blob, kind)
-                {
-                    let action = format!("tool_call:{title}");
-                    let now = std::time::SystemTime::now();
-                    self.turn_progress
-                        .record_mutation(mutation, action.clone(), now);
-                    // B1: also note on the shared sink so the registry's
-                    // last_mutation_at advances mid-turn (not only at turn end).
-                    if let Some(sink) = self.mutation_sink.as_ref() {
-                        sink.note(mutation, action, now);
-                    }
-                } else {
-                    self.turn_progress
-                        .note_action(format!("tool_call:{title}"));
-                }
+                self.note_tool_call_mutation(update, title, kind);
                 true
             }
             "tool_call_update" => {
@@ -1813,6 +1834,17 @@ impl AcpClient {
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
                 tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
+                // rawInput often arrives on the update (object-shaped), not the
+                // initial tool_call — re-classify so reply-only publishes count.
+                let title = update
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tool");
+                let kind = update
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                self.note_tool_call_mutation(update, title, kind);
                 false
             }
             "plan" => {
@@ -3725,6 +3757,112 @@ mod tests {
         });
         let _ = client.handle_session_update(&read_msg);
         assert!(sink.take().is_none(), "Read must not count as durable write");
+    }
+
+    /// False-positive ratchet: Shell title + object rawInput with
+    /// `buzz messages send` must mark produced_message and classify ok.
+    #[tokio::test]
+    async fn reply_only_shell_object_raw_input_is_not_returned_empty() {
+        let mut client = spawn_inert_client().await;
+        let sink = crate::agent_heartbeat::MidTurnMutationSink::new();
+        client.set_mutation_sink(sink.clone());
+        client.reset_turn_progress();
+
+        // Initial tool_call often has a generic title and object rawInput.
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_reply",
+                    "title": "Shell",
+                    "kind": "execute",
+                    "rawInput": {
+                        "command": "buzz messages send --channel c678 --reply-to abc --content 'Confirmed'"
+                    }
+                },
+            }
+        });
+        let _ = client.handle_session_update(&msg);
+        let noted = sink.take().expect("Shell publish must note Message");
+        assert_eq!(noted.0, crate::agent_heartbeat::MutationKind::Message);
+
+        let progress = client.take_turn_progress();
+        assert!(
+            progress.produced_message,
+            "reply-only turn must set produced_message"
+        );
+        assert!(!progress.produced_file);
+        assert_eq!(
+            crate::agent_heartbeat::classify_ok_turn_outcome(
+                progress.produced_message,
+                progress.produced_file
+            ),
+            crate::agent_heartbeat::TurnOutcomeLabel::Ok
+        );
+    }
+
+    /// rawInput may land on tool_call_update after a bare Shell tool_call.
+    #[tokio::test]
+    async fn tool_call_update_object_raw_input_classifies_message() {
+        let mut client = spawn_inert_client().await;
+        client.reset_turn_progress();
+
+        let start = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_late",
+                    "title": "Shell",
+                    "kind": "shell",
+                },
+            }
+        });
+        let _ = client.handle_session_update(&start);
+        let mid = client.take_turn_progress();
+        assert!(
+            !mid.produced_message,
+            "bare Shell title must not yet count as publish"
+        );
+        // Restore progress so the update can accumulate (take cleared it).
+        client.reset_turn_progress();
+        // Re-simulate: note_action from bare call, then update with rawInput.
+        let _ = client.handle_session_update(&start);
+
+        let update = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_late",
+                    "status": "completed",
+                    "kind": "shell",
+                    "rawInput": {
+                        "command": "buzz messages send --channel x --content hi"
+                    }
+                },
+            }
+        });
+        let _ = client.handle_session_update(&update);
+        let progress = client.take_turn_progress();
+        assert!(
+            progress.produced_message,
+            "tool_call_update rawInput must count as Message publish"
+        );
+        assert_eq!(
+            crate::agent_heartbeat::classify_ok_turn_outcome(
+                progress.produced_message,
+                progress.produced_file
+            ),
+            crate::agent_heartbeat::TurnOutcomeLabel::Ok
+        );
     }
 
     #[tokio::test]
