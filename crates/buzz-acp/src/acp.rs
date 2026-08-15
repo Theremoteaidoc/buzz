@@ -211,6 +211,8 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Durable write / publish progress for the in-flight turn (WO #133).
+    turn_progress: crate::agent_heartbeat::TurnProgress,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,6 +552,7 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            turn_progress: crate::agent_heartbeat::TurnProgress::default(),
         })
     }
 
@@ -879,6 +882,16 @@ impl AcpClient {
     /// publish a kind 44200 NIP-AM event.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         self.goose_usage.take()
+    }
+
+    /// Reset per-turn durable-progress tracking (call at turn start).
+    pub fn reset_turn_progress(&mut self) {
+        self.turn_progress = crate::agent_heartbeat::TurnProgress::default();
+    }
+
+    /// Consume durable message/file progress for the completed turn (WO #133).
+    pub fn take_turn_progress(&mut self) -> crate::agent_heartbeat::TurnProgress {
+        std::mem::take(&mut self.turn_progress)
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1734,6 +1747,9 @@ impl AcpClient {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
                 }
+                // ACP stream chunks are not Buzz publishes — do not count as mutations.
+                self.turn_progress
+                    .note_action("agent_message_chunk");
                 false
             }
             "tool_call" => {
@@ -1745,7 +1761,31 @@ impl AcpClient {
                     .get("kind")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
+                // Prefer rawInput/command text when present so shell
+                // `buzz messages send` is classified even if title is generic.
+                let raw_hint = update
+                    .get("rawInput")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| update.pointer("/content/0/text").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                let classify_blob = if raw_hint.is_empty() {
+                    title.to_string()
+                } else {
+                    format!("{title} {raw_hint}")
+                };
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                if let Some(mutation) =
+                    crate::agent_heartbeat::classify_tool_mutation(&classify_blob, kind)
+                {
+                    self.turn_progress.record_mutation(
+                        mutation,
+                        format!("tool_call:{title}"),
+                        std::time::SystemTime::now(),
+                    );
+                } else {
+                    self.turn_progress
+                        .note_action(format!("tool_call:{title}"));
+                }
                 true
             }
             "tool_call_update" => {

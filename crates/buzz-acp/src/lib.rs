@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod acp;
+mod agent_heartbeat;
 mod config;
 mod engram_fetch;
 mod filter;
@@ -12,6 +13,11 @@ mod relay;
 mod setup_mode;
 mod usage;
 
+pub use agent_heartbeat::{
+    classify_identity, classify_ok_turn_outcome, classify_tool_mutation, HeartbeatRegistry,
+    HeartbeatState, IdentityClass, MutationKind, TurnOutcomeLabel, TurnProgress,
+    HEARTBEAT_CADENCE_DEFAULT, HEARTBEAT_CADENCE_MAX, HEARTBEAT_CADENCE_MIN, STALL_AFTER_DEFAULT,
+};
 pub use usage::TurnUsage;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1632,6 +1638,35 @@ async fn tokio_main() -> Result<()> {
     };
     let mut heartbeat_in_flight = false;
 
+    // WO #133 — progress heartbeat (distinct from agent self-prompt heartbeat).
+    let agent_label = std::env::var("BUZZ_ACP_DISPLAY_NAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| config.session_title.clone())
+        .unwrap_or_else(|| {
+            crate::config::normalize_agent_command_identity(&config.agent_command)
+        });
+    let mut agent_hb = HeartbeatRegistry::new(STALL_AFTER_DEFAULT, HEARTBEAT_CADENCE_DEFAULT);
+    if let Ok(path) = std::env::var("BUZZ_ACP_HEARTBEAT_STATUS_PATH") {
+        if !path.trim().is_empty() {
+            agent_hb.set_status_path(path);
+        }
+    } else {
+        agent_hb.set_status_path(format!(
+            "/tmp/buzz-acp-heartbeat-{}.json",
+            &pubkey_hex[..pubkey_hex.len().min(16)]
+        ));
+    }
+    let has_agent_service = std::env::var_os("BUZZ_AGENT_SERVICE").is_some()
+        || std::path::Path::new(&format!("/etc/systemd/system/buzz-agent@{}.service", agent_label))
+            .exists();
+    agent_hb.register_identity(
+        &agent_label,
+        classify_identity(&agent_label, has_agent_service),
+        std::time::SystemTime::now(),
+    );
+    let mut agent_hb_ticker = tokio::time::interval(HEARTBEAT_CADENCE_DEFAULT);
+
     let mut presence_heartbeat = if config.presence_enabled {
         let interval = Duration::from_secs(60);
         Some(tokio::time::interval_at(
@@ -1842,9 +1877,7 @@ async fn tokio_main() -> Result<()> {
             // called on relay events or pool results, neither of which
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, Some(&mut agent_hb), &agent_label) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -1880,9 +1913,7 @@ async fn tokio_main() -> Result<()> {
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
-            for (channel_id, thread_tags) in
-                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-            {
+            for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, Some(&mut agent_hb), &agent_label) {
                 typing_channels.insert(channel_id, thread_tags);
             }
         }
@@ -2247,6 +2278,7 @@ async fn tokio_main() -> Result<()> {
                                 Some(m) => m.prompt_tag,
                                 None => {
                                     tracing::debug!(channel_id = %buzz_event.channel_id, kind = buzz_event.event.kind.as_u16(), "event matched no rule — dropping");
+                                    agent_hb.record_dropped_event("matched_no_rule");
                                     continue;
                                 }
                             };
@@ -2329,9 +2361,7 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
                             if pool_ready {
-                                for (channel_id, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                                {
+                                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, Some(&mut agent_hb), &agent_label) {
                                     typing_channels.insert(channel_id, thread_tags);
                                 }
                             }
@@ -2379,15 +2409,48 @@ async fn tokio_main() -> Result<()> {
                         tracing::debug!("heartbeat_skipped_pool_not_ready");
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
-                        for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                        {
+                        for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, Some(&mut agent_hb), &agent_label) {
                             typing_channels.insert(channel_id, thread_tags);
                         }
                     } else if pool.any_idle() {
                         dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
                     } else {
                         tracing::debug!("heartbeat_skipped_busy");
+                    }
+                    None
+                }
+                _ = agent_hb_ticker.tick() => {
+                    let now = std::time::SystemTime::now();
+                    agent_hb.touch_alive(&agent_label, now);
+                    if let Some(payload) = agent_hb.tick(&agent_label, now) {
+                        if payload.state == HeartbeatState::Stalled {
+                            tracing::warn!(
+                                target: "agent_heartbeat",
+                                agent = %payload.agent,
+                                turn_id = ?payload.turn_id,
+                                elapsed_in_phase_secs = payload.elapsed_in_phase_secs,
+                                "agent stalled — no durable write within stall window"
+                            );
+                        }
+                        tracing::info!(
+                            target: "agent_heartbeat",
+                            agent = %payload.agent,
+                            state = payload.state.as_str(),
+                            phase = %payload.phase,
+                            turn_id = ?payload.turn_id,
+                            last_mutation_at = ?payload.last_mutation_at,
+                            elapsed_in_phase_secs = payload.elapsed_in_phase_secs,
+                            dropped_events = payload.dropped_events,
+                            "agent_heartbeat"
+                        );
+                        if let Some(ref observer) = observer {
+                            observer.emit(
+                                "agent_heartbeat",
+                                None,
+                                &observer::ObserverContext::default(),
+                                serde_json::to_value(&payload).unwrap_or_default(),
+                            );
+                        }
                     }
                     None
                 }
@@ -2459,6 +2522,8 @@ async fn tokio_main() -> Result<()> {
                     &mut respawn_tasks,
                     observer.clone(),
                     Some(&ctx.rest_client),
+                    Some(&mut agent_hb),
+                    &agent_label,
                 ) == LoopAction::Exit
                 {
                     break;
@@ -2478,9 +2543,7 @@ async fn tokio_main() -> Result<()> {
                 {
                     break;
                 }
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, Some(&mut agent_hb), &agent_label) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2503,9 +2566,7 @@ async fn tokio_main() -> Result<()> {
                     tracing::error!("all agents dead — exiting");
                     break;
                 }
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, Some(&mut agent_hb), &agent_label) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2647,9 +2708,7 @@ async fn tokio_main() -> Result<()> {
                 // tear down the in-flight task; on its completion the
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, Some(&mut agent_hb), &agent_label) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2675,9 +2734,7 @@ async fn tokio_main() -> Result<()> {
                             "ready",
                             None,
                         );
-                        for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                        {
+                        for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, Some(&mut agent_hb), &agent_label) {
                             typing_channels.insert(channel_id, thread_tags);
                         }
                     }
@@ -3011,6 +3068,8 @@ fn dispatch_pending(
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
     last_activity: &mut tokio::time::Instant,
+    mut agent_hb: Option<&mut HeartbeatRegistry>,
+    agent_label: &str,
 ) -> Vec<(Uuid, ThreadTags)> {
     let mut dispatched_channels = Vec::new();
     loop {
@@ -3064,6 +3123,24 @@ fn dispatch_pending(
         let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
         let turn_id = Uuid::new_v4().to_string();
         let task_turn_id = turn_id.clone();
+
+        if let Some(hb) = agent_hb.as_deref_mut() {
+            let now = std::time::SystemTime::now();
+            let _ = hb.set_state(
+                agent_label,
+                HeartbeatState::Claimed,
+                "claimed",
+                Some(turn_id.clone()),
+                now,
+            );
+            let _ = hb.set_state(
+                agent_label,
+                HeartbeatState::Running,
+                "running",
+                Some(turn_id.clone()),
+                now,
+            );
+        }
 
         let abort_handle = pool.join_set.spawn(async move {
             pool::run_prompt_task(
@@ -3165,6 +3242,8 @@ fn handle_prompt_result(
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
     rest_client: Option<&relay::RestClient>,
+    mut agent_heartbeat: Option<&mut HeartbeatRegistry>,
+    agent_label: &str,
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
@@ -3301,8 +3380,14 @@ fn handle_prompt_result(
         result.agent.state.invalidate_channel(ch);
     }
 
-    let outcome_label = match &result.outcome {
-        PromptOutcome::Ok(_) => "ok",
+    let outcome_label: &'static str = match &result.outcome {
+        PromptOutcome::Ok(_) => match classify_ok_turn_outcome(
+            result.produced_message,
+            result.produced_file,
+        ) {
+            TurnOutcomeLabel::Ok => "ok",
+            TurnOutcomeLabel::ReturnedEmpty => "returned_empty",
+        },
         PromptOutcome::Error(_) => "error",
         PromptOutcome::Timeout(TimeoutKind::Idle) => "idle_timeout",
         PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "hard_timeout",
@@ -3356,6 +3441,44 @@ fn handle_prompt_result(
                 outcome = outcome_label,
                 "agent_returned"
             );
+            if let Some(hb) = agent_heartbeat.as_deref_mut() {
+                let now = std::time::SystemTime::now();
+                let state = if outcome_label == "returned_empty" {
+                    HeartbeatState::ReturnedEmpty
+                } else {
+                    HeartbeatState::Returned
+                };
+                let phase = if outcome_label == "returned_empty" {
+                    "returned_empty"
+                } else {
+                    "returned"
+                };
+                if outcome_label == "returned_empty" {
+                    tracing::warn!(
+                        agent = agent_index,
+                        turn_id = %turn_id,
+                        "turn returned with no message and no file — recording returned_empty"
+                    );
+                }
+                if result.produced_message {
+                    hb.record_mutation(
+                        agent_label,
+                        MutationKind::Message,
+                        "turn_message",
+                        now,
+                    );
+                }
+                if result.produced_file {
+                    hb.record_mutation(agent_label, MutationKind::File, "turn_file", now);
+                }
+                let _ = hb.set_state(
+                    agent_label,
+                    state,
+                    phase,
+                    Some(turn_id.clone()),
+                    now,
+                );
+            }
             pool.return_agent(result.agent);
         }
         // Fatal outcomes: the agent subprocess is dead or poisoned — respawn it.
@@ -3367,6 +3490,9 @@ fn handle_prompt_result(
                 pid = harness_pid,
                 "agent_returned — respawning"
             );
+            if let Some(hb) = agent_heartbeat.as_deref_mut() {
+                let _ = hb.mark_dead(agent_label, std::time::SystemTime::now());
+            }
             let death_message: String = match outcome_label {
                 "exited" => "Agent process exited unexpectedly".to_string(),
                 "hard_timeout" => {
@@ -5441,6 +5567,8 @@ mod error_outcome_emission_tests {
             turn_id: "test-turn-id".to_string(),
             outcome,
             batch: None,
+            produced_message: false,
+            produced_file: false,
         };
 
         handle_prompt_result(
@@ -5455,6 +5583,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            None,
+            "test-agent",
         );
 
         let turn_errors: Vec<_> = observer
@@ -5607,6 +5737,8 @@ mod error_outcome_emission_tests {
                 turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: None,
+                produced_message: false,
+                produced_file: false,
             };
             handle_prompt_result(
                 &mut pool,
@@ -5620,6 +5752,8 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 Some(observer.clone()),
                 None,
+                None,
+                "test-agent",
             );
             let events = observer.snapshot();
             let turn_error = events.iter().find(|e| e.kind == "turn_error").unwrap();
@@ -5697,6 +5831,8 @@ mod error_outcome_emission_tests {
                 turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: Some(batch),
+                produced_message: false,
+                produced_file: false,
             };
             handle_prompt_result(
                 &mut pool,
@@ -5710,6 +5846,8 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 None,
                 None,
+                None,
+                "test-agent",
             );
             (
                 queue.pending_channels(),
@@ -5802,6 +5940,8 @@ mod error_outcome_emission_tests {
                 turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: Some(batch),
+                produced_message: false,
+                produced_file: false,
             };
             handle_prompt_result(
                 &mut pool,
@@ -5815,6 +5955,8 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 None,
                 None,
+                None,
+                "test-agent",
             );
             (
                 queue.pending_channels(),
@@ -5893,6 +6035,8 @@ mod error_outcome_emission_tests {
                 recently_active: true,
             }),
             batch: Some(batch),
+            produced_message: false,
+            produced_file: false,
         };
         handle_prompt_result(
             &mut pool,
@@ -5906,6 +6050,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            None,
+            "test-agent",
         );
 
         let events = observer.snapshot();
@@ -5986,6 +6132,8 @@ mod error_outcome_emission_tests {
                 recently_active: true,
             }),
             batch: Some(batch),
+            produced_message: false,
+            produced_file: false,
         };
         handle_prompt_result(
             &mut pool,
@@ -5999,6 +6147,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            None,
+            "test-agent",
         );
 
         let events = observer.snapshot();
@@ -6100,6 +6250,8 @@ mod error_outcome_emission_tests {
             turn_id: "test-turn-id".to_string(),
             outcome: PromptOutcome::CancelDrainTimeout(grace),
             batch: Some(batch),
+            produced_message: false,
+            produced_file: false,
         };
 
         handle_prompt_result(
@@ -6114,6 +6266,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            None,
+            "test-agent",
         );
 
         // Batch preserved as a cancelled merge, not dead-lettered — same
@@ -6232,6 +6386,8 @@ mod error_outcome_emission_tests {
             // `classify_control_cancel_failure` — `handle_prompt_result`
             // never sees one to requeue.
             batch: None,
+            produced_message: false,
+            produced_file: false,
         };
 
         handle_prompt_result(
@@ -6246,6 +6402,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            None,
+            "test-agent",
         );
 
         // No batch to merge — the queue has nothing pending for any channel.
@@ -6415,6 +6573,8 @@ mod error_outcome_emission_tests {
             turn_id: "test-turn-id".to_string(),
             outcome: PromptOutcome::Error(auth_error),
             batch: Some(batch),
+            produced_message: false,
+            produced_file: false,
         };
         handle_prompt_result(
             &mut pool,
@@ -6428,6 +6588,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            None,
+            "test-agent",
         );
 
         // The batch must not be requeued: pending_channels returns 0.
@@ -6500,6 +6662,8 @@ mod error_outcome_emission_tests {
             turn_id: "test-turn-id".to_string(),
             outcome: PromptOutcome::Error(usage_error),
             batch: Some(batch),
+            produced_message: false,
+            produced_file: false,
         };
         handle_prompt_result(
             &mut pool,
@@ -6513,6 +6677,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            None,
+            "test-agent",
         );
 
         // Non-auth application error: batch IS requeued (first attempt, retry budget > 0).
