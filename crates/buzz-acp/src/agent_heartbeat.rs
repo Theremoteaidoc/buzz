@@ -186,10 +186,10 @@ pub fn tool_mutation_classify_blob(
 /// Default founder-readable status path (outside systemd PrivateTmp).
 ///
 /// Units set `PrivateTmp=true`, so `/tmp/buzz-acp-heartbeat-*.json` is invisible
-/// to the founder and other seats. Path is under `/opt/buzz/agents/home`
-/// (already in unit `ReadWritePaths`). Prefer
-/// `/opt/buzz/agents/home/heartbeat/<agent>.json` over `shared/` (root-owned
-/// tree on this host). Override with `BUZZ_ACP_HEARTBEAT_STATUS_PATH`.
+/// to the founder and other seats. Default is under the shared home tree
+/// (`ReadWritePaths` already covers `/opt/buzz/agents/home`). Override with
+/// `BUZZ_ACP_HEARTBEAT_STATUS_PATH`. Deploy must ensure
+/// `/opt/buzz/agents/home/shared/heartbeat/` exists and is writable by seats.
 pub fn default_status_path(agent_label: &str) -> PathBuf {
     let safe: String = agent_label
         .chars()
@@ -206,7 +206,9 @@ pub fn default_status_path(agent_label: &str) -> PathBuf {
     } else {
         safe
     };
-    PathBuf::from(format!("/opt/buzz/agents/home/heartbeat/{safe}.json"))
+    PathBuf::from(format!(
+        "/opt/buzz/agents/home/shared/heartbeat/{safe}.json"
+    ))
 }
 
 /// Heuristic: does this ACP tool_call title/kind count as a durable write?
@@ -1118,8 +1120,8 @@ mod tests {
         let path = default_status_path("FirstMate");
         let s = path.to_string_lossy();
         assert!(
-            s.starts_with("/opt/buzz/agents/home/heartbeat/"),
-            "must be under home/heartbeat (outside PrivateTmp), got {s}"
+            s.starts_with("/opt/buzz/agents/home/shared/heartbeat/"),
+            "must be under shared/heartbeat (outside PrivateTmp), got {s}"
         );
         assert!(!s.contains("/tmp/"), "must not use PrivateTmp /tmp");
         assert!(s.ends_with("FirstMate.json"));
