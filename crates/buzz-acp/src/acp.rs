@@ -1348,11 +1348,14 @@ impl AcpClient {
     /// either of two timeouts fires. Returns `Result<value, IdleTimeout |
     /// HardTimeout | other>`.
     ///
+    /// Two clocks, on purpose (WO #146):
     /// - `idle_timeout`: silent-agent guard, **reset on every line of valid
-    ///   JSON** (and explicitly on `session/update` notifications).
-    /// - `hard_deadline`: absolute wall-clock cap on the whole call, passed
-    ///   in so that `cancel_with_cleanup` can inherit the remaining budget
-    ///   from the original turn rather than starting a fresh timer.
+    ///   JSON** (and explicitly on `session/update` notifications). A working
+    ///   agent survives.
+    /// - `hard_deadline`: absolute wall-clock cap from turn start. Steer
+    ///   success, tool activity, and `session/update` do **not** move it. A
+    ///   stuck turn dies. Passed in so `cancel_with_cleanup` inherits the
+    ///   remaining budget rather than starting a fresh timer.
     ///
     /// While reading, the loop interleaves goose-native non-cancelling steer
     /// requests via `tokio::select!`. The select uses `biased` for
@@ -1362,6 +1365,7 @@ impl AcpClient {
     /// guarded by `pending_steer.is_none()` so at most one steer is in
     /// flight at a time; a successful steer response is routed to the
     /// caller's oneshot ack instead of being returned as the prompt result.
+    /// Acking Success does not grant a new hard-cap budget.
     ///
     /// `session_id` is threaded in lexically by callers so the goose-native
     /// steer arm can complete `sessionId` in the steer JSON-RPC params at
@@ -1374,7 +1378,10 @@ impl AcpClient {
         expected_id: u64,
         idle_timeout: std::time::Duration,
         hard_deadline: tokio::time::Instant,
-        max_duration: std::time::Duration,
+        // Unused after WO #146: the Instant is absolute from turn start and
+        // is never recomputed from this duration. Kept so existing call sites
+        // (including cancel's remaining-budget argument) do not churn.
+        _max_duration: std::time::Duration,
     ) -> Result<serde_json::Value, AcpError> {
         use tokio::time::Instant;
 
@@ -1399,7 +1406,6 @@ impl AcpClient {
 
         let now = Instant::now();
         let mut idle_deadline = now + idle_timeout;
-        let mut hard_deadline = hard_deadline;
         let mut last_activity_at = now;
 
         loop {
@@ -1673,12 +1679,9 @@ impl AcpClient {
                                                 // Delivered, but into a NEW
                                                 // turn: the one this read loop
                                                 // is awaiting had already
-                                                // finished. Renewing the hard
-                                                // deadline here would extend
-                                                // the clock on a settled turn,
-                                                // so leave it alone and let the
-                                                // prompt response land on its
-                                                // original budget.
+                                                // finished. The hard Instant
+                                                // is absolute per turn (WO
+                                                // #146) — never renewed here.
                                                 tracing::info!(
                                                     "steer accepted as {STEER_OUTCOME_STARTED_NEW_TURN}: \
                                                      awaited turn had ended — hard deadline not renewed"
@@ -1686,15 +1689,13 @@ impl AcpClient {
                                                 crate::pool::SteerAck::Success
                                             }
                                             Some(_) => {
-                                                let renew_now = Instant::now();
-                                                let new_deadline = renew_now + max_duration;
-                                                if new_deadline > hard_deadline {
-                                                    hard_deadline = new_deadline;
-                                                    self.current_hard_deadline = Some(new_deadline);
-                                                    tracing::info!(
-                                                        "steer success: renewed hard deadline ({max_duration:?} from now)"
-                                                    );
-                                                }
+                                                // Steer is new instruction,
+                                                // not new budget. Idle still
+                                                // resets on this JSON line;
+                                                // the hard Instant does not.
+                                                tracing::info!(
+                                                    "steer success: hard deadline unchanged (absolute from turn start)"
+                                                );
                                                 crate::pool::SteerAck::Success
                                             }
                                             None => {
@@ -4067,21 +4068,23 @@ mod tests {
         }
     }
 
-    /// Steer-success renewal keeps the turn alive past the original hard
-    /// deadline. This is the red-on-old/green-on-new test for the core bug
-    /// fix (acp.rs:1440-1444): without renewal, the read loop returns
-    /// `HardTimeout` before the prompt response arrives.
+    /// WO #146 tripwire: steer-success does **not** renew the hard Instant.
+    /// Two clocks: idle_timeout resets on activity; max_turn_duration is a
+    /// true wall-clock cap from turn start. A steer is new instruction, not
+    /// new budget. Without this, a chatty/steered turn never hits the cap
+    /// (the 2413s wedge against an 1800s factory cap).
     ///
     /// Timeline:
     ///   t≈0:    read loop starts, `hard_deadline = now + 1s`
-    ///   t≈0.5s: script emits steer response (id=0) → Success renewal
-    ///           moves `hard_deadline` to `now + 3s` (≈3.5s from start)
-    ///   t≈1.5s: script emits prompt response (id=999) → `Ok`
+    ///   t≈0.5s: script emits steer response (id=0) → Success; Instant stays
+    ///   t≈1.0s: original hard Instant fires → `HardTimeout`
+    ///   t≈1.5s: prompt response would have arrived — too late
     ///
-    /// Old code: `HardTimeout` at t≈1s (before prompt response).
-    /// New code: deadline renewed at t≈0.5s → prompt response at t≈1.5s → `Ok`.
+    /// Old (wrong) code: deadline renewed at t≈0.5s → prompt at t≈1.5s → `Ok`.
+    /// New code: original Instant fires → `HardTimeout`; ack is still Success
+    /// (the steer was delivered).
     #[tokio::test]
-    async fn steer_success_renews_hard_deadline_and_survives_past_original() {
+    async fn steer_success_does_not_renew_hard_deadline_and_hard_timeout_fires() {
         let script = "sleep 0.5; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"stopReason\":\"end_turn\"}}'; \
                       sleep 1; \
@@ -4114,17 +4117,17 @@ mod tests {
         send_task.await.expect("send_task should complete");
 
         assert!(
-            result.is_ok(),
-            "expected Ok (prompt response after renewed deadline), got {result:?}"
+            matches!(result, Err(AcpError::HardTimeout { .. })),
+            "steer success must NOT renew the hard deadline, so the original \
+             Instant must fire; got {result:?}"
         );
-        assert_eq!(result.unwrap()["done"], serde_json::json!(true));
 
         let ack = ack_rx
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
             crate::pool::SteerAck::Success => {}
-            other => panic!("expected SteerAck::Success, got {other:?}"),
+            other => panic!("expected SteerAck::Success (steer was delivered), got {other:?}"),
         }
     }
 
@@ -4400,15 +4403,15 @@ mod tests {
         }
     }
 
-    /// Test 5: `injected` renews the hard deadline, so the turn survives past
-    /// its original one. Mirrors
-    /// `steer_success_renews_hard_deadline_and_survives_past_original` for
-    /// the `_session/steering` transport.
+    /// Test 5 / WO #146: `injected` acks Success but does **not** renew the
+    /// hard Instant. Mirrors
+    /// `steer_success_does_not_renew_hard_deadline_and_hard_timeout_fires`
+    /// for the `_session/steering` transport.
     ///
     /// Timeline: original hard deadline at t≈1s; steer response at t≈0.5s
-    /// renews it to t≈3.5s; prompt response at t≈1.5s lands inside it.
+    /// leaves it in place; original Instant fires before the t≈1.5s prompt.
     #[tokio::test]
-    async fn acp_steer_injected_renews_hard_deadline_and_survives_past_original() {
+    async fn acp_steer_injected_does_not_renew_hard_deadline() {
         let script = "sleep 0.5; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"outcome\":\"injected\"}}'; \
                       sleep 1; \
@@ -4438,10 +4441,10 @@ mod tests {
         send_task.await.expect("send_task should complete");
 
         assert!(
-            result.is_ok(),
-            "injected must renew the deadline so the prompt response still lands, got {result:?}"
+            matches!(result, Err(AcpError::HardTimeout { .. })),
+            "injected must NOT renew the hard deadline, so the original Instant \
+             must fire; got {result:?}"
         );
-        assert_eq!(result.unwrap()["done"], serde_json::json!(true));
         let ack = ack_rx.await.expect("ack must be received");
         assert!(
             matches!(ack, crate::pool::SteerAck::Success),
@@ -4449,17 +4452,16 @@ mod tests {
         );
     }
 
-    /// Test 6: **red/green for the no-renewal rule.** `startedNewTurn` means
-    /// the turn Buzz was steering had already ended and the adapter began a
-    /// fresh, detached one. It acks `Success` (the message WAS delivered, so
-    /// the event must not be redelivered) but must NOT renew the hard
-    /// deadline — that clock belongs to a turn which is already settled.
+    /// Test 6: `startedNewTurn` acks `Success` (the message WAS delivered, so
+    /// the event must not be redelivered) and must NOT renew the hard
+    /// deadline. After WO #146 this matches the `injected` rule — both
+    /// Success outcomes leave the original Instant in place. Kept as its
+    /// own case so a regression that special-cases `injected` still dies
+    /// here.
     ///
-    /// Same timeline as the `injected` test, so the only difference is the
-    /// outcome string: original hard deadline at t≈1s, steer response at
-    /// t≈0.5s, prompt response at t≈1.5s. With renewal the prompt response
-    /// would land and this returns `Ok`; without renewal the original
-    /// deadline fires first and we get `HardTimeout`.
+    /// Same timeline as the `injected` test: original hard deadline at t≈1s,
+    /// steer response at t≈0.5s, prompt response at t≈1.5s. Without renewal
+    /// the original deadline fires first and we get `HardTimeout`.
     #[tokio::test]
     async fn acp_steer_started_new_turn_acks_success_without_renewing_hard_deadline() {
         let script = "sleep 0.5; \

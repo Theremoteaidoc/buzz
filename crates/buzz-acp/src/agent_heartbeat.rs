@@ -1229,6 +1229,81 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// WO #146: `elapsed_in_phase_secs` is live on `payload_for(now)` and
+    /// cadence-sampled on the status file. Two file reads 15s apart showing
+    /// the same elapsed is the 75s emit window, not a frozen SystemTime.
+    #[test]
+    fn elapsed_in_phase_is_live_and_cadence_sampled_on_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "buzz-acp-wo146-elapsed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let status_path = dir.join("status.json");
+
+        let cadence = HEARTBEAT_CADENCE_DEFAULT;
+        let mut reg = HeartbeatRegistry::new(STALL_AFTER_DEFAULT, cadence);
+        reg.set_status_path(&status_path);
+        reg.register_identity("firstmate", IdentityClass::AgentSeat, t0());
+        reg.set_state(
+            "firstmate",
+            HeartbeatState::Running,
+            "running",
+            Some("turn-elapsed".into()),
+            t0(),
+        );
+        let _ = reg.tick("firstmate", t0());
+        assert!(status_path.is_file(), "running seat writes a snapshot");
+
+        let file_elapsed = |path: &std::path::Path| -> u64 {
+            let body = std::fs::read_to_string(path).expect("read status");
+            let parsed: serde_json::Value = serde_json::from_str(&body).expect("status JSON");
+            parsed
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|seat| seat["elapsed_in_phase_secs"].as_u64())
+                .expect("elapsed_in_phase_secs")
+        };
+
+        assert_eq!(file_elapsed(&status_path), 0);
+        assert_eq!(
+            reg.payload_for("firstmate", t0())
+                .expect("payload")
+                .elapsed_in_phase_secs,
+            0
+        );
+
+        let t15 = t0() + Duration::from_secs(15);
+        reg.touch_alive("firstmate", t15);
+        assert!(
+            reg.tick("firstmate", t15).is_none(),
+            "cadence is 75s; a 15s tick must not re-emit"
+        );
+        assert_eq!(
+            file_elapsed(&status_path),
+            0,
+            "status file stays at last emit until cadence"
+        );
+        assert_eq!(
+            reg.payload_for("firstmate", t15)
+                .expect("payload")
+                .elapsed_in_phase_secs,
+            15,
+            "live payload_for must advance with now"
+        );
+
+        let t_cadence = t0() + cadence;
+        reg.touch_alive("firstmate", t_cadence);
+        let emitted = reg
+            .tick("firstmate", t_cadence)
+            .expect("cadence emit");
+        assert_eq!(emitted.elapsed_in_phase_secs, cadence.as_secs());
+        assert_eq!(file_elapsed(&status_path), cadence.as_secs());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Cron/notify keys stay excluded: emit_initial must not write for them.
     #[test]
     fn startup_emit_skips_cron_notify_identity() {

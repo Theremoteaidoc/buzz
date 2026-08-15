@@ -2611,12 +2611,12 @@ async fn tokio_main() -> Result<()> {
                 //     outcome: the message was delivered, but into a fresh
                 //     turn because the one being steered had already
                 //     finished. Delivery is what this arm keys on, so the
-                //     event is still dropped. The read loop deliberately
-                //     does NOT renew its hard deadline in that case (the
-                //     awaited turn is settled), while
-                //     `extend_in_flight_deadline` below still applies —
-                //     the agent really is running more work, so the
-                //     channel's in-flight budget should reflect it.
+                //     event is still dropped.
+                //
+                //     WO #146: a steer is new instruction, not new budget.
+                //     Do not extend the in-flight queue deadline here —
+                //     that was a second, quieter renewal of the same cap
+                //     the hard Instant already owns. Absolute per turn.
                 //
                 //   Err(_) where the write never landed (Transport /
                 //   ExpectedRunIdMissing):
@@ -2707,9 +2707,6 @@ async fn tokio_main() -> Result<()> {
                     signal_fallback,
                     "non-cancelling steer ack received"
                 );
-                if matches!(ack, Ok(pool::SteerAck::Success)) {
-                    queue.extend_in_flight_deadline(channel_id, config.max_turn_duration_secs);
-                }
                 if drop_withheld {
                     queue.remove_event(channel_id, &event_id);
                 }
@@ -5725,6 +5722,9 @@ mod error_outcome_emission_tests {
     }
 
     /// idle_timeout outcome_label is "idle_timeout"; hard_timeout is "hard_timeout".
+    /// WO #146: a turn that exceeds the original hard Instant is recorded as
+    /// the `hard_timeout` outcome (the ratchet on "the cap fired but nobody
+    /// noticed").
     #[tokio::test]
     async fn timeout_outcome_labels_differ() {
         let check_label = |outcome: PromptOutcome, expected_label: &'static str| async move {
