@@ -184,6 +184,8 @@ pub fn parse_systemctl_roster(stdout: &str) -> Vec<RosterSeat> {
 /// Evaluate one seat given optional status-file mtime (injectable for tests).
 ///
 /// `status_mtime == None` means the file is absent → [`ExternalLiveness::Unknown`].
+/// A future mtime (clock skew / `touch -d`) is also [`ExternalLiveness::Unknown`] —
+/// age is undeterminable, never fail-open to Healthy.
 pub fn evaluate_mtime(
     status_mtime: Option<SystemTime>,
     now: SystemTime,
@@ -192,7 +194,10 @@ pub fn evaluate_mtime(
     let Some(mtime) = status_mtime else {
         return ExternalLiveness::Unknown;
     };
-    let age = now.duration_since(mtime).unwrap_or(Duration::ZERO);
+    let Ok(age) = now.duration_since(mtime) else {
+        // mtime > now: undeterminable input must refuse, not collapse to age 0.
+        return ExternalLiveness::Unknown;
+    };
     let age_secs = age.as_secs();
     if age > dead_after {
         ExternalLiveness::Dead { age_secs }
@@ -427,6 +432,18 @@ buzz-orchestrator.service         loaded active running Buzz orchestrator
         let v = evaluate_mtime(Some(mtime), now, dead_after);
         assert_eq!(v, ExternalLiveness::Healthy { age_secs: 100 });
         assert!(!v.is_alarm());
+    }
+
+    #[test]
+    fn future_mtime_is_unknown_never_healthy() {
+        // Clock jump / touch -d future: duration_since errors → Unknown (alarms).
+        let dead_after = Duration::from_secs(225);
+        let now = t0();
+        let mtime = t0() + Duration::from_secs(60);
+        let v = evaluate_mtime(Some(mtime), now, dead_after);
+        assert_eq!(v, ExternalLiveness::Unknown);
+        assert_ne!(v.as_str(), "healthy");
+        assert!(v.is_alarm());
     }
 
     #[test]

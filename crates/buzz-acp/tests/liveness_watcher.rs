@@ -8,6 +8,7 @@
 //! 4. dead_after strictly greater than stall_after.
 //! 5. Roster includes buzz-orchestrator.service; directory listing does not
 //!    expand the authoritative seat list.
+//! 6. Future status-file mtime → Unknown (not Healthy); is_alarm().
 
 use std::fs;
 use std::path::PathBuf;
@@ -73,6 +74,46 @@ fn wedge_detection_starved_mtime_declares_dead_without_alive_refresh() {
         dead_after,
     );
     assert!(matches!(v, ExternalLiveness::Dead { .. }));
+}
+
+#[test]
+fn future_mtime_is_unknown_alarms_not_healthy() {
+    // Pin mtime in the future relative to `now` — undeterminable age must not
+    // collapse to Healthy (rule-4 / duration_since Err path).
+    let dead_after = watcher_dead_after();
+    let now = t0();
+    let future_mtime = t0() + Duration::from_secs(3_600);
+    let v = evaluate_mtime(Some(future_mtime), now, dead_after);
+    assert_eq!(v, ExternalLiveness::Unknown);
+    assert_ne!(v.as_str(), "healthy");
+    assert!(v.is_alarm());
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Codex.json");
+    fs::write(&path, br#"[{"agent":"Codex","state":"running"}]"#).unwrap();
+    let status = Command::new("touch")
+        .args(["-d", "2099-01-01 00:00:00 UTC", path.to_str().unwrap()])
+        .status()
+        .expect("touch");
+    assert!(status.success());
+
+    let roster = vec![RosterSeat {
+        unit: "buzz-agent@codex.service".into(),
+        seat: "codex".into(),
+    }];
+    let report = build_report(
+        "seascope-ci-1",
+        dir.path(),
+        &roster,
+        SystemTime::now(),
+        dead_after,
+    );
+    assert_eq!(report.seats.len(), 1);
+    assert_eq!(report.seats[0].verdict, ExternalLiveness::Unknown);
+    assert_ne!(report.seats[0].verdict.as_str(), "healthy");
+    assert!(report.seats[0].alarm);
+    assert!(report.seats[0].verdict.is_alarm());
+    assert_eq!(report.alarm_count, 1);
 }
 
 #[test]
