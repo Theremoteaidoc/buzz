@@ -213,6 +213,10 @@ pub struct AcpClient {
     goose_usage: UsageTracker,
     /// Durable write / publish progress for the in-flight turn (WO #133).
     turn_progress: crate::agent_heartbeat::TurnProgress,
+    /// Optional mid-turn bridge into the heartbeat registry (WO #133 B1).
+    /// When set, classified Message/File mutations are noted here so the
+    /// main-loop ticker can advance `last_mutation_at` during the turn.
+    mutation_sink: Option<crate::agent_heartbeat::MidTurnMutationSink>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -553,6 +557,7 @@ impl AcpClient {
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             turn_progress: crate::agent_heartbeat::TurnProgress::default(),
+            mutation_sink: None,
         })
     }
 
@@ -892,6 +897,15 @@ impl AcpClient {
     /// Consume durable message/file progress for the completed turn (WO #133).
     pub fn take_turn_progress(&mut self) -> crate::agent_heartbeat::TurnProgress {
         std::mem::take(&mut self.turn_progress)
+    }
+
+    /// Install the mid-turn mutation sink used to advance the heartbeat
+    /// registry during an in-flight turn (WO #133 B1).
+    pub fn set_mutation_sink(
+        &mut self,
+        sink: crate::agent_heartbeat::MidTurnMutationSink,
+    ) {
+        self.mutation_sink = Some(sink);
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1777,11 +1791,15 @@ impl AcpClient {
                 if let Some(mutation) =
                     crate::agent_heartbeat::classify_tool_mutation(&classify_blob, kind)
                 {
-                    self.turn_progress.record_mutation(
-                        mutation,
-                        format!("tool_call:{title}"),
-                        std::time::SystemTime::now(),
-                    );
+                    let action = format!("tool_call:{title}");
+                    let now = std::time::SystemTime::now();
+                    self.turn_progress
+                        .record_mutation(mutation, action.clone(), now);
+                    // B1: also note on the shared sink so the registry's
+                    // last_mutation_at advances mid-turn (not only at turn end).
+                    if let Some(sink) = self.mutation_sink.as_ref() {
+                        sink.note(mutation, action, now);
+                    }
                 } else {
                     self.turn_progress
                         .note_action(format!("tool_call:{title}"));
@@ -3667,6 +3685,46 @@ mod tests {
         let _ = client.handle_session_update(&msg);
 
         assert_eq!(client.active_run_id(), Some("run-abc-123"));
+    }
+
+    /// WO #133 B1 wiring tripwire: classified tool_call must reach the sink.
+    #[tokio::test]
+    async fn tool_call_mutation_notifies_mid_turn_sink() {
+        let mut client = spawn_inert_client().await;
+        let sink = crate::agent_heartbeat::MidTurnMutationSink::new();
+        client.set_mutation_sink(sink.clone());
+
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "title": "Write",
+                    "kind": "edit",
+                },
+            }
+        });
+        let _ = client.handle_session_update(&msg);
+        let noted = sink.take().expect("Write tool_call must note sink");
+        assert_eq!(noted.0, crate::agent_heartbeat::MutationKind::File);
+
+        // Read-only tools must not notify the sink.
+        let read_msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "title": "Read",
+                    "kind": "read",
+                },
+            }
+        });
+        let _ = client.handle_session_update(&read_msg);
+        assert!(sink.take().is_none(), "Read must not count as durable write");
     }
 
     #[tokio::test]

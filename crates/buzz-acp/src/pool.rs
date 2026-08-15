@@ -568,6 +568,9 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Mid-turn durable-write sink for the heartbeat registry (WO #133 B1).
+    /// Installed on the AcpClient at turn start; drained by the main ticker.
+    pub mutation_sink: Option<crate::agent_heartbeat::MidTurnMutationSink>,
 }
 
 impl AgentPool {
@@ -1414,6 +1417,11 @@ pub async fn run_prompt_task(
     };
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.reset_turn_progress();
+    // WO #133 B1: install mid-turn sink so classified writes reach the registry
+    // before turn end (stall anchor must not freeze at phase_entered_at).
+    if let Some(sink) = ctx.mutation_sink.clone() {
+        agent.acp.set_mutation_sink(sink);
+    }
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
         None,
@@ -6550,6 +6558,7 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            mutation_sink: None,
         }
     }
 

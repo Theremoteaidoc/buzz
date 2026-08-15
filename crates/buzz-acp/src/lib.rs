@@ -14,9 +14,10 @@ mod setup_mode;
 mod usage;
 
 pub use agent_heartbeat::{
-    classify_identity, classify_ok_turn_outcome, classify_tool_mutation, HeartbeatRegistry,
-    HeartbeatState, IdentityClass, MutationKind, TurnOutcomeLabel, TurnProgress,
-    HEARTBEAT_CADENCE_DEFAULT, HEARTBEAT_CADENCE_MAX, HEARTBEAT_CADENCE_MIN, STALL_AFTER_DEFAULT,
+    classify_identity, classify_ok_turn_outcome, classify_tool_mutation, dead_after_for,
+    HeartbeatRegistry, HeartbeatState, IdentityClass, MidTurnMutationSink, MutationKind,
+    TurnOutcomeLabel, TurnProgress, HEARTBEAT_CADENCE_DEFAULT, HEARTBEAT_CADENCE_MAX,
+    HEARTBEAT_CADENCE_MIN, STALL_AFTER_DEFAULT,
 };
 pub use usage::TurnUsage;
 
@@ -1584,6 +1585,8 @@ async fn tokio_main() -> Result<()> {
     }
 
     let base_prompt_content = config.base_prompt_content.take();
+    // WO #133 B1: shared mid-turn mutation sink (ACP → registry via ticker drain).
+    let mutation_sink = MidTurnMutationSink::new();
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -1618,6 +1621,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        mutation_sink: Some(mutation_sink.clone()),
     });
 
     if !config.memory_enabled {
@@ -2421,6 +2425,13 @@ async fn tokio_main() -> Result<()> {
                 }
                 _ = agent_hb_ticker.tick() => {
                     let now = std::time::SystemTime::now();
+                    // B1: apply any mid-turn durable writes before stall evaluation.
+                    mutation_sink.drain_into(&mut agent_hb, &agent_label);
+                    // B2 honesty: touch_alive immediately before tick means the
+                    // in-process missed-seen → dead branch cannot fire while
+                    // this loop is alive. Wedge/death for a hung process needs
+                    // an out-of-process status-file watcher (follow-up WO).
+                    // Production `dead` here is from mark_dead on respawn/exit.
                     agent_hb.touch_alive(&agent_label, now);
                     if let Some(payload) = agent_hb.tick(&agent_label, now) {
                         if payload.state == HeartbeatState::Stalled {

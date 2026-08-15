@@ -6,9 +6,21 @@
 //!
 //! Identity is three-way: agent seats (full model), cron/notify keys (excluded),
 //! and human-backed sessions (visible, never stalled/dead as agents).
+//!
+//! ## Death detection honesty (B2)
+//!
+//! In-process `tick()` can declare `dead` only when `last_seen_at` goes silent
+//! past [`HeartbeatRegistry::dead_after`]. The wired harness calls
+//! [`HeartbeatRegistry::touch_alive`] on the same event loop immediately before
+//! `tick`, so that branch cannot observe a wedged process. Production `dead`
+//! today comes from explicit [`HeartbeatRegistry::mark_dead`] (respawn/exit).
+//! Cap-independent wedge detection requires an out-of-process consumer of the
+//! status-file mtime (follow-up WO) — do not document in-process
+//! dead-within-one-cadence as a live signal for the self-heartbeat path.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -20,6 +32,26 @@ pub const HEARTBEAT_CADENCE_MAX: Duration = Duration::from_secs(90);
 pub const HEARTBEAT_CADENCE_DEFAULT: Duration = Duration::from_secs(75);
 /// Silence without a write past this → `stalled` (not healthy).
 pub const STALL_AFTER_DEFAULT: Duration = Duration::from_secs(180);
+
+/// Smallest multiple of `cadence` that is strictly greater than `stall_after`.
+///
+/// Keeps dead-by-missed-seen ordered after stall so a silent-but-still-seen
+/// seat can stall before any latent missed-seen death path fires (B3).
+pub fn dead_after_for(stall_after: Duration, cadence: Duration) -> Duration {
+    assert!(
+        cadence > Duration::ZERO,
+        "heartbeat cadence must be positive"
+    );
+    let mut n = 1u32;
+    let mut dead = cadence;
+    while dead <= stall_after {
+        n = n
+            .checked_add(1)
+            .expect("dead_after cadence multiple overflow");
+        dead = cadence.saturating_mul(n);
+    }
+    dead
+}
 
 /// Three identity categories (WO #133 tightened spec).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -44,7 +76,9 @@ pub enum HeartbeatState {
     Returned,
     /// Progress signal failed: alive but no write within stall window.
     Stalled,
-    /// Process gone / kill observed — within one cadence of death.
+    /// Process gone / kill observed (explicit `mark_dead`), or — only when
+    /// `touch_alive` is *not* wired on the same loop — missed-seen past
+    /// `dead_after`. The self-heartbeat harness cannot observe its own wedge.
     Dead,
     /// Turn ended ok with neither message nor file.
     ReturnedEmpty,
@@ -105,6 +139,9 @@ pub enum MutationKind {
 ///
 /// `agent_message_chunk` is intentionally NOT a mutation — that is the ACP
 /// stream to the observer, not a Buzz publish or filesystem write.
+///
+/// Over-counts progress (fail-safe): shell redirects / `tee` / scratch writes
+/// may count as File. Prefer false "healthy" over false `stalled`.
 pub fn classify_tool_mutation(title: &str, kind: &str) -> Option<MutationKind> {
     let title_l = title.to_ascii_lowercase();
     let kind_l = kind.to_ascii_lowercase();
@@ -183,6 +220,39 @@ impl TurnProgress {
     }
 }
 
+/// Cross-task bridge: ACP records mid-turn durable writes here; the main-loop
+/// ticker drains into [`HeartbeatRegistry`] so `last_mutation_at` advances
+/// during the turn (B1), not only at turn end.
+#[derive(Clone, Default)]
+pub struct MidTurnMutationSink {
+    inner: Arc<Mutex<Option<(MutationKind, String, SystemTime)>>>,
+}
+
+impl MidTurnMutationSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Note the latest classified durable write (Message/File).
+    pub fn note(&self, kind: MutationKind, action: impl Into<String>, at: SystemTime) {
+        if let Ok(mut guard) = self.inner.lock() {
+            *guard = Some((kind, action.into(), at));
+        }
+    }
+
+    /// Take the pending write (if any) without applying it — tests / probes.
+    pub fn take(&self) -> Option<(MutationKind, String, SystemTime)> {
+        self.inner.lock().ok().and_then(|mut g| g.take())
+    }
+
+    /// Drain the latest mid-turn write into the registry (idempotent if empty).
+    pub fn drain_into(&self, reg: &mut HeartbeatRegistry, agent: &str) {
+        if let Some((kind, action, at)) = self.take() {
+            reg.record_mutation(agent, kind, action, at);
+        }
+    }
+}
+
 /// Founder-readable heartbeat payload (WO #133 shape).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct HeartbeatPayload {
@@ -247,6 +317,8 @@ pub struct HeartbeatRegistry {
     drops: DroppedEventCounter,
     stall_after: Duration,
     cadence: Duration,
+    /// Missed-seen death threshold: multiple of cadence, strictly > stall_after.
+    dead_after: Duration,
     status_path: Option<PathBuf>,
     /// Emitted payloads (tests / in-process consumers).
     pub emissions: Vec<HeartbeatPayload>,
@@ -254,11 +326,21 @@ pub struct HeartbeatRegistry {
 
 impl HeartbeatRegistry {
     pub fn new(stall_after: Duration, cadence: Duration) -> Self {
+        let dead_after = dead_after_for(stall_after, cadence);
+        debug_assert!(
+            dead_after > stall_after,
+            "dead_after ({dead_after:?}) must be strictly greater than stall_after ({stall_after:?})"
+        );
+        debug_assert!(
+            dead_after.as_nanos() % cadence.as_nanos() == 0,
+            "dead_after must be a multiple of cadence"
+        );
         Self {
             seats: HashMap::new(),
             drops: DroppedEventCounter::default(),
             stall_after,
             cadence,
+            dead_after,
             status_path: None,
             emissions: Vec::new(),
         }
@@ -274,6 +356,14 @@ impl HeartbeatRegistry {
 
     pub fn cadence(&self) -> Duration {
         self.cadence
+    }
+
+    pub fn stall_after(&self) -> Duration {
+        self.stall_after
+    }
+
+    pub fn dead_after(&self) -> Duration {
+        self.dead_after
     }
 
     pub fn dropped_events(&self) -> &DroppedEventCounter {
@@ -393,7 +483,12 @@ impl HeartbeatRegistry {
         self.set_state(agent, HeartbeatState::Dead, "dead", None, now)
     }
 
-    /// Evaluate stall / missed-cadence death and emit on cadence while active.
+    /// Evaluate stall / missed-seen death and emit on cadence while active.
+    ///
+    /// Missed-seen → `dead` uses [`Self::dead_after`] (cadence multiple >
+    /// `stall_after`), not a single cadence. When the harness calls
+    /// [`Self::touch_alive`] immediately before this method, that death branch
+    /// cannot fire (B2 honesty) — rely on [`Self::mark_dead`] for exit/respawn.
     pub fn tick(&mut self, agent: &str, now: SystemTime) -> Option<HeartbeatPayload> {
         let identity = self.seats.get(agent).map(|s| s.identity)?;
         if identity == IdentityClass::CronNotify {
@@ -428,11 +523,12 @@ impl HeartbeatRegistry {
                     | HeartbeatState::Stalled
             );
 
-            // Missed more than one full cadence without being seen → dead.
+            // Missed-seen past dead_after (multiple of cadence > stall_after).
+            // Latent unless touch_alive is withheld (out-of-process / rewire).
             let since_seen = now
                 .duration_since(seat.last_seen_at)
                 .unwrap_or_default();
-            if active && since_seen > self.cadence {
+            if active && since_seen > self.dead_after {
                 Some(("dead", HeartbeatState::Dead))
             } else if active && self.should_stall(seat, now) {
                 Some(("stalled", HeartbeatState::Stalled))
@@ -462,6 +558,10 @@ impl HeartbeatRegistry {
     }
 
     /// Touch liveness without implying a durable write (process still answering).
+    ///
+    /// The wired harness calls this immediately before [`Self::tick`], which
+    /// masks in-process missed-seen death (B2). Do not treat that path as a
+    /// wedge detector.
     pub fn touch_alive(&mut self, agent: &str, now: SystemTime) {
         if let Some(seat) = self.seats.get_mut(agent) {
             seat.last_seen_at = now;
@@ -623,7 +723,7 @@ mod tests {
         UNIX_EPOCH + Duration::from_secs(1_700_000_000)
     }
 
-    /// Kill mid-turn → `dead` within one cadence window.
+    /// Kill mid-turn → `dead` via explicit mark_dead (respawn/exit path).
     #[test]
     fn heartbeat_dead_on_kill() {
         let mut reg = HeartbeatRegistry::new(Duration::from_secs(180), Duration::from_secs(75));
@@ -642,7 +742,7 @@ mod tests {
         assert_eq!(payload.state.as_str(), "dead");
         assert!(
             killed_at.duration_since(t0()).unwrap() < reg.cadence(),
-            "dead must surface within one cadence window"
+            "explicit mark_dead must surface promptly (not gated on dead_after)"
         );
         assert_eq!(reg.liveness_label("codex", killed_at), Some("dead"));
     }
@@ -671,6 +771,96 @@ mod tests {
         assert_eq!(payload.state, HeartbeatState::Stalled);
         assert_ne!(reg.liveness_label("firstmate", after_stall), Some("healthy"));
         assert_eq!(reg.liveness_label("firstmate", after_stall), Some("stalled"));
+    }
+
+    /// L1 tripwire (B1): long turn with periodic durable writes stays running.
+    ///
+    /// Uses the production MidTurnMutationSink → drain_into path. Without
+    /// mid-turn registry updates, `should_stall` would freeze on
+    /// `phase_entered_at` and flip to stalled after stall_after.
+    #[test]
+    fn heartbeat_long_turn_with_periodic_writes_stays_running() {
+        let stall_after = Duration::from_secs(180);
+        let cadence = Duration::from_secs(75);
+        let mut reg = HeartbeatRegistry::new(stall_after, cadence);
+        let sink = MidTurnMutationSink::new();
+        reg.register_identity("codex", IdentityClass::AgentSeat, t0());
+        reg.set_state(
+            "codex",
+            HeartbeatState::Running,
+            "running",
+            Some("turn-long".into()),
+            t0(),
+        );
+
+        // 10-minute turn, durable write every 60s — well past stall_after.
+        for minute in 1u64..=10 {
+            let t = t0() + Duration::from_secs(60 * minute);
+            sink.note(MutationKind::File, format!("tool_call:Write@{minute}"), t);
+            // Production ticker: drain mid-turn writes, then touch_alive, then tick.
+            sink.drain_into(&mut reg, "codex");
+            reg.touch_alive("codex", t);
+            let _ = reg.tick("codex", t);
+            let payload = reg.payload_for("codex", t).expect("payload");
+            assert_ne!(
+                payload.state,
+                HeartbeatState::Stalled,
+                "minute {minute}: healthy long turn must not stall"
+            );
+            assert_eq!(payload.state, HeartbeatState::Running);
+            assert_eq!(reg.liveness_label("codex", t), Some("healthy"));
+        }
+
+        // Contrast: turn-local progress alone (pre-B1 wiring) leaves the
+        // registry anchor frozen at phase_entered_at → stalls past stall_after.
+        let mut frozen = HeartbeatRegistry::new(stall_after, cadence);
+        frozen.register_identity("codex", IdentityClass::AgentSeat, t0());
+        frozen.set_state(
+            "codex",
+            HeartbeatState::Running,
+            "running",
+            Some("turn-frozen".into()),
+            t0(),
+        );
+        let mut local_only = TurnProgress::default();
+        for minute in 1u64..=4 {
+            let t = t0() + Duration::from_secs(60 * minute);
+            local_only.record_mutation(MutationKind::File, "Write", t);
+            // Deliberately do NOT call record_mutation / drain_into on registry.
+        }
+        let after = t0() + stall_after + Duration::from_secs(1);
+        frozen.touch_alive("codex", after);
+        let stalled = frozen
+            .tick("codex", after)
+            .expect("stall without mid-turn registry");
+        assert_eq!(stalled.state, HeartbeatState::Stalled);
+        assert!(local_only.has_durable_output());
+    }
+
+    /// B3: dead_after is a cadence multiple strictly greater than stall_after.
+    #[test]
+    fn dead_after_exceeds_stall_and_is_cadence_multiple() {
+        let stall = STALL_AFTER_DEFAULT;
+        let cadence = HEARTBEAT_CADENCE_DEFAULT;
+        let dead = dead_after_for(stall, cadence);
+        assert!(dead > stall);
+        assert_eq!(dead.as_secs() % cadence.as_secs(), 0);
+        // Defaults: 75s cadence, 180s stall → 225s dead (3× cadence).
+        assert_eq!(dead, Duration::from_secs(225));
+
+        let reg = HeartbeatRegistry::with_defaults();
+        assert_eq!(reg.dead_after(), dead);
+        assert!(reg.dead_after() > reg.stall_after());
+
+        // Without touch_alive, stall must win before missed-seen dead.
+        let mut reg = HeartbeatRegistry::new(stall, cadence);
+        reg.register_identity("codex", IdentityClass::AgentSeat, t0());
+        reg.set_state("codex", HeartbeatState::Running, "running", None, t0());
+        // Do not touch_alive — last_seen stays at t0.
+        let at_stall = t0() + stall + Duration::from_secs(1);
+        let payload = reg.tick("codex", at_stall).expect("stall before dead");
+        assert_eq!(payload.state, HeartbeatState::Stalled);
+        assert!(at_stall.duration_since(t0()).unwrap() < reg.dead_after());
     }
 
     /// Turn returns ok with no message/file → recorded `returned_empty`.
