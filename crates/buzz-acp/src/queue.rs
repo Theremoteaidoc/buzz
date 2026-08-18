@@ -2028,6 +2028,60 @@ mod tests {
         assert!(prompt.contains("actually scope it to v2 only"));
     }
 
+    /// Exact ExpectedRunIdMissing cancel+merge fallback sequence:
+    /// original flushed (in flight) → incoming withheld for native steer →
+    /// release (ack: no transport) → requeue_as_cancelled → mark_complete →
+    /// flush_next → format_prompt (the string the agent actually receives).
+    #[test]
+    fn test_cancel_merge_fallback_withhold_release_redelivers_to_prompt() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        q.push(make_queued(ch, "original in-flight work"));
+        let batch = q.flush_next().unwrap();
+        assert!(any_in_flight(&q));
+
+        let incoming = make_queued(ch, "incoming steer message");
+        let incoming_id = incoming.event.id.to_hex();
+        q.push(incoming);
+        assert!(
+            q.mark_native_steer_pending(ch, &incoming_id),
+            "incoming event must be withheld during the native-steer ack window"
+        );
+        assert!(
+            q.flush_next().is_none(),
+            "withheld incoming must not flush while the original turn is in flight"
+        );
+
+        q.release_native_steer(ch, &incoming_id);
+        q.requeue_as_cancelled(batch, CancelReason::Steer);
+        q.mark_complete(ch);
+
+        let merged = q.flush_next().expect("merged cancel+merge batch");
+        assert_eq!(merged.events.len(), 1, "incoming event in regular bucket");
+        assert_eq!(
+            merged.cancelled_events.len(),
+            1,
+            "original event in cancelled bucket"
+        );
+        assert_eq!(merged.cancel_reason, Some(CancelReason::Steer));
+        assert!(merged.events[0].event.content.contains("incoming steer message"));
+        assert!(merged.cancelled_events[0]
+            .event
+            .content
+            .contains("original in-flight work"));
+
+        let prompt = format_prompt(&merged, &FormatPromptArgs::default()).join("\n\n");
+        assert!(
+            prompt.contains("original in-flight work"),
+            "original cancelled prompt must reach the agent: {prompt}"
+        );
+        assert!(
+            prompt.contains("incoming steer message"),
+            "incoming message must reach the agent: {prompt}"
+        );
+    }
+
     #[test]
     fn test_format_prompt_steer_framing_multi_event() {
         // Multi-event header path must also branch on reason.
