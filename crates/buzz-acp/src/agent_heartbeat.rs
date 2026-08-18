@@ -409,6 +409,41 @@ pub struct HeartbeatRegistry {
     status_path: Option<PathBuf>,
     /// Emitted payloads (tests / in-process consumers).
     pub emissions: Vec<HeartbeatPayload>,
+    /// Last status-file write outcome (WO #150).
+    ///
+    /// Lets in-process consumers and the liveness watcher tell "seat up,
+    /// heartbeat broken" (an emit happened but the file write failed) from
+    /// "no heartbeat yet" (no emit attempted). `emit_now` previously dropped
+    /// the write result with `let _ =`, so a persistently failing write was
+    /// invisible while the seat looked live in memory.
+    write_health: WriteHealth,
+}
+
+/// Status-file write health, tracked across `emit_now` calls (WO #150).
+///
+/// A write is only attempted when a `status_path` is configured; seats with
+/// no path never leave [`WriteHealth::default`] (no attempt, no error).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WriteHealth {
+    /// Human-readable last write error, cleared on the next successful write.
+    /// `Some` here with a non-zero `attempts` is the "heartbeat broken" signal.
+    pub last_error: Option<String>,
+    /// Consecutive failed writes since the last success (reset to 0 on success).
+    pub consecutive_failures: u64,
+    /// Total status-file write attempts (success or failure).
+    pub attempts: u64,
+    /// Wall clock of the last successful write, if any.
+    pub last_success_at: Option<SystemTime>,
+}
+
+impl WriteHealth {
+    /// True once at least one write was attempted and the most recent one failed.
+    ///
+    /// This is the "seat up, heartbeat broken" predicate: distinct from a seat
+    /// that has never attempted a write (`attempts == 0` → "no heartbeat yet").
+    pub fn is_broken(&self) -> bool {
+        self.attempts > 0 && self.last_error.is_some()
+    }
 }
 
 impl HeartbeatRegistry {
@@ -430,6 +465,7 @@ impl HeartbeatRegistry {
             dead_after,
             status_path: None,
             emissions: Vec::new(),
+            write_health: WriteHealth::default(),
         }
     }
 
@@ -693,9 +729,40 @@ impl HeartbeatRegistry {
         }
         self.emissions.push(payload.clone());
         if let Some(path) = self.status_path.clone() {
-            let _ = write_status_snapshot(path.as_path(), &self.snapshot(now));
+            self.write_health.attempts += 1;
+            match write_status_snapshot(path.as_path(), &self.snapshot(now)) {
+                Ok(()) => {
+                    self.write_health.consecutive_failures = 0;
+                    self.write_health.last_error = None;
+                    self.write_health.last_success_at = Some(now);
+                }
+                Err(err) => {
+                    self.write_health.consecutive_failures += 1;
+                    let msg = format!("{err}");
+                    // Surface the failure the liveness watcher would otherwise
+                    // never learn about: the seat is up (emit happened) but the
+                    // status file the watcher reads is not being written.
+                    tracing::error!(
+                        agent = %agent,
+                        path = %path.display(),
+                        consecutive_failures = self.write_health.consecutive_failures,
+                        error = %msg,
+                        "heartbeat status write failed (seat up, heartbeat broken)"
+                    );
+                    self.write_health.last_error = Some(msg);
+                }
+            }
         }
         Some(payload)
+    }
+
+    /// Status-file write health for this registry (WO #150).
+    ///
+    /// Use [`WriteHealth::is_broken`] to distinguish "seat up, heartbeat broken"
+    /// (a write was attempted and the most recent one failed) from "no heartbeat
+    /// yet" (`attempts == 0`).
+    pub fn write_health(&self) -> &WriteHealth {
+        &self.write_health
     }
 
     pub fn payload_for(&self, agent: &str, now: SystemTime) -> Option<HeartbeatPayload> {
@@ -1227,6 +1294,97 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// WO #150 tripwire: `emit_now` must surface status-file write failures via
+    /// `write_health()` instead of swallowing them, so the liveness watcher can
+    /// tell "seat up, heartbeat broken" from "no heartbeat yet".
+    #[test]
+    fn emit_surfaces_status_write_failure() {
+        let base = std::env::temp_dir().join(format!(
+            "buzz-acp-wo150-hb-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("temp base dir");
+        // Make the status path's parent a *file* so create_dir_all/write fail
+        // deterministically (NotADirectory) on every emit.
+        let blocker = base.join("blocker");
+        std::fs::write(&blocker, b"not a dir").expect("write blocker file");
+        let status_path = blocker.join("codex.json");
+
+        let mut reg = HeartbeatRegistry::with_defaults();
+        reg.register_identity("codex", IdentityClass::AgentSeat, t0());
+
+        // Precondition: no write attempted yet → "no heartbeat yet", not broken.
+        assert_eq!(reg.write_health().attempts, 0);
+        assert!(
+            !reg.write_health().is_broken(),
+            "a seat with no write attempt must read as 'no heartbeat yet', not broken"
+        );
+
+        reg.set_status_path(&status_path);
+        let payload = reg
+            .emit_initial("codex", t0())
+            .expect("emit still produces a payload even when the write fails");
+        assert_eq!(payload.state, HeartbeatState::AgentInitialized);
+
+        // The write must have been attempted and failed — and be observable.
+        assert_eq!(reg.write_health().attempts, 1, "write must be attempted");
+        assert_eq!(reg.write_health().consecutive_failures, 1);
+        assert!(
+            reg.write_health().is_broken(),
+            "a failed status write must surface as 'seat up, heartbeat broken'"
+        );
+        assert!(
+            reg.write_health().last_error.is_some(),
+            "the write error text must be captured, not swallowed"
+        );
+        assert!(
+            reg.write_health().last_success_at.is_none(),
+            "no successful write has happened"
+        );
+        assert!(
+            !status_path.exists(),
+            "the file genuinely was not written (failure is real, not simulated)"
+        );
+
+        // A second failing emit compounds the failure counter.
+        reg.set_state(
+            "codex",
+            HeartbeatState::Running,
+            "running",
+            Some("turn-1".into()),
+            t0() + Duration::from_secs(1),
+        );
+        assert_eq!(reg.write_health().consecutive_failures, 2);
+        assert!(reg.write_health().is_broken());
+
+        // Repoint at a writable path: the next successful emit clears the error,
+        // proving recovery is observable too.
+        let good_path = base.join("codex.json");
+        reg.set_status_path(&good_path);
+        reg.set_state(
+            "codex",
+            HeartbeatState::Blocked,
+            "blocked",
+            Some("turn-1".into()),
+            t0() + Duration::from_secs(2),
+        );
+        assert!(good_path.is_file(), "recovery write must land");
+        assert_eq!(
+            reg.write_health().consecutive_failures,
+            0,
+            "a successful write resets the failure streak"
+        );
+        assert!(
+            !reg.write_health().is_broken(),
+            "a healthy write clears the 'broken' signal"
+        );
+        assert!(reg.write_health().last_error.is_none());
+        assert!(reg.write_health().last_success_at.is_some());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// WO #146: `elapsed_in_phase_secs` is live on `payload_for(now)` and
