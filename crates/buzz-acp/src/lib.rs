@@ -1680,7 +1680,16 @@ async fn tokio_main() -> Result<()> {
     );
     // WO #148 — write status file before any turn so the external watcher
     // never sees a running unit with no file (cry-wolf on idle seats).
+    // WO #150 — surface an initial write failure instead of swallowing it, so
+    // "seat up, heartbeat broken" is distinguishable from "no heartbeat yet".
     let _ = agent_hb.emit_initial(&agent_label, boot_at);
+    if agent_hb.write_health().is_broken() {
+        tracing::error!(
+            agent = %agent_label,
+            error = agent_hb.write_health().last_error.as_deref().unwrap_or("unknown"),
+            "initial heartbeat status write failed at boot (seat up, heartbeat broken)"
+        );
+    }
     let mut agent_hb_ticker = tokio::time::interval(HEARTBEAT_CADENCE_DEFAULT);
 
     let mut presence_heartbeat = if config.presence_enabled {
