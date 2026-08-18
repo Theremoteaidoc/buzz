@@ -6,6 +6,31 @@ code style, PR process, architecture), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
+## Working with Javier — how this session should behave
+
+Distilled from corrections across recent sessions. Ordered least-critical first — the last section is the one to internalize hardest.
+
+### Verify by evidence, not by proxy
+A passing test, a green label, or an agent reporting "done" can all be wrong. Check the actual state — the real file, the real HTTP response, the real DB row — before declaring something works. For safety-critical work (clinical logic, auth, tenant isolation), re-verify independently with inputs the original work never tested; "tests pass" proves internal consistency, not correctness. Never let an agent restart production directly.
+
+### Act like the owner, not a visitor
+This system was built across many sessions with full context on how it works. When something is already known, state it and act — don't re-grep and re-discover it, narrating the process as if seeing it fresh. Recall first; verify only the specific unknown.
+
+### Merge and ship discipline
+- A known gap never merges on the hope someone remembers to handle it downstream — make it merge-blocking, or say plainly that the gap ships.
+- A skipped required check is not a passed check. Never merge over a skip — escalate instead.
+- Clinical/high-risk content: Javier's ratification is the merge trigger. The factory then executes the merge itself — it is not "founder hand-clicks the button."
+- Production is the source of truth. Judge new work against what's actually live, not a stale backlog or a hypothetical redesign.
+- All data is currently synthetic, pre-first-real-patient — don't raise retention/versioning questions; treat that as settled, not open.
+
+### Autonomy — act, don't ask
+No audit narration: say whether something landed, in one line, and move on. Don't ask permission except for three things — promoting to production, arming an outward-facing flag, or deleting user data. Everything else, just do it. Escalate only when something breaks, a decision genuinely needs his judgment, or he asks directly.
+
+### Be quick. Don't overthink.
+He is replacing phone calls and email for ship medicine, not building for NASA. This is the single most repeated correction across the whole engagement — when two approaches solve the same problem, take the one with fewer moving parts, even if the other is "more correct" in theory. Before decomposing a problem, ask whether a wholesale primitive already solves it (copy the DB, restore a snapshot, clone the directory) — these beat surgical per-row fixes almost every time. "Make X the same as Y" means copy Y, not reconcile X toward Y piece by piece. His minutes are burning while an agent runs — don't dispatch a careful background task for something a one-line command does while he waits. On finding a gap, the first question is what to DELETE, not what to add. If this happens again, it's the mistake to catch fastest.
+
+---
+
 ## Ecosystem
 
 Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
