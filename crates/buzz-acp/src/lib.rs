@@ -2682,31 +2682,8 @@ async fn tokio_main() -> Result<()> {
                 //     pending_steer on every return path. If it does,
                 //     treat as PromptCompletedNeutral to avoid leaking
                 //     the withheld event in `withheld_native_steer`.
-                let (release_withheld, drop_withheld, signal_fallback) = match &ack {
-                    Ok(pool::SteerAck::Success) => (false, true, false),
-                    // -32601 = method_not_found: agent does not implement the
-                    // steer extension. Fire cancel+merge so the message still
-                    // reaches the agent.
-                    Ok(pool::SteerAck::Err(pool::SteerError::AgentError { code, .. }))
-                        if *code == -32601 =>
-                    {
-                        (true, false, true)
-                    }
-                    // AgentError: write landed, agent rejected it at the
-                    // application level (e.g. wrong run id). Release for
-                    // normal dispatch; no fallback signal (the turn is still
-                    // running or just ended — either way there is nothing to
-                    // cancel).
-                    Ok(pool::SteerAck::Err(pool::SteerError::AgentError { .. })) => {
-                        (true, false, false)
-                    }
-                    // Transport / ExpectedRunIdMissing / OutcomeRejected: the
-                    // steer did not land. Release and fire the cancel+merge
-                    // fallback so the message still reaches the agent.
-                    Ok(pool::SteerAck::Err(_)) => (true, false, true),
-                    Ok(pool::SteerAck::PromptCompletedNeutral) => (true, false, false),
-                    Err(_recv_err) => (true, false, false),
-                };
+                let (release_withheld, drop_withheld, signal_fallback) =
+                    steer_ack_disposition(&ack);
                 tracing::info!(
                     channel = %channel_id,
                     event_id = %event_id,
@@ -2729,6 +2706,20 @@ async fn tokio_main() -> Result<()> {
                     // will pick it up as part of the merged batch and
                     // re-prompt the agent.
                     signal_in_flight_task(&mut pool, channel_id, ControlSignal::Steer);
+                    // Channel-visible: adapters without `_session/steering`
+                    // used to cancel silently. One line per fallback event.
+                    for content in channel_notices_for_steer_ack(&ack, &agent_label) {
+                        let thread_tags = typing_channels
+                            .get(&channel_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        spawn_channel_notice(
+                            Some(&ctx.rest_client),
+                            channel_id,
+                            thread_tags,
+                            content,
+                        );
+                    }
                 }
                 // After releasing a withheld event, give dispatch a chance
                 // to re-flush. If the prompt is still in flight, the
@@ -2980,6 +2971,59 @@ fn signal_in_flight_task(
         }
     }
     false
+}
+
+/// Map a steer ack to `(release_withheld, drop_withheld, signal_fallback)`.
+///
+/// Extracted from the main-loop `SteerAckEvent` arm so tests can pin the
+/// Success path (unchanged: drop withheld, no fallback) separately from
+/// the cancel+merge fallback that now posts a channel-visible notice.
+fn steer_ack_disposition(
+    ack: &std::result::Result<pool::SteerAck, tokio::sync::oneshot::error::RecvError>,
+) -> (bool, bool, bool) {
+    match ack {
+        Ok(pool::SteerAck::Success) => (false, true, false),
+        // -32601 = method_not_found: agent does not implement the
+        // steer extension. Fire cancel+merge so the message still
+        // reaches the agent.
+        Ok(pool::SteerAck::Err(pool::SteerError::AgentError { code, .. })) if *code == -32601 => {
+            (true, false, true)
+        }
+        // AgentError: write landed, agent rejected it at the
+        // application level (e.g. wrong run id). Release for
+        // normal dispatch; no fallback signal (the turn is still
+        // running or just ended — either way there is nothing to
+        // cancel).
+        Ok(pool::SteerAck::Err(pool::SteerError::AgentError { .. })) => (true, false, false),
+        // Transport / ExpectedRunIdMissing / OutcomeRejected: the
+        // steer did not land. Release and fire the cancel+merge
+        // fallback so the message still reaches the agent.
+        Ok(pool::SteerAck::Err(_)) => (true, false, true),
+        Ok(pool::SteerAck::PromptCompletedNeutral) => (true, false, false),
+        Err(_recv_err) => (true, false, false),
+    }
+}
+
+/// Channel-visible line posted when cancel+merge fallback fires.
+fn cancel_merge_fallback_notice(agent_label: &str) -> String {
+    format!("{agent_label}'s in-flight turn was cancelled by an incoming message.")
+}
+
+/// Notices the `SteerAckEvent` handler posts to the channel for this ack.
+///
+/// Empty on the Success / non-fallback paths. Exactly one notice when
+/// `signal_fallback` is true. Production iterates this same function so a
+/// test that counts these strings is counting what would be posted.
+fn channel_notices_for_steer_ack(
+    ack: &std::result::Result<pool::SteerAck, tokio::sync::oneshot::error::RecvError>,
+    agent_label: &str,
+) -> Vec<String> {
+    let (_, _, signal_fallback) = steer_ack_disposition(ack);
+    if signal_fallback {
+        vec![cancel_merge_fallback_notice(agent_label)]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Attempt the non-cancelling (ACP) steer for a freshly-queued event.
@@ -3235,6 +3279,24 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+/// Spawn a task that posts a user-visible notice (kind:9) to the relay.
+///
+/// Shared by dead-letter failure notices and the cancel+merge fallback
+/// notice so neither duplicates the tokio::spawn block.
+fn spawn_channel_notice(
+    rest_client: Option<&relay::RestClient>,
+    channel_id: Uuid,
+    thread_tags: ThreadTags,
+    content: String,
+) {
+    if let Some(rest) = rest_client {
+        let rest = rest.clone();
+        tokio::spawn(async move {
+            pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+        });
+    }
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -3244,18 +3306,12 @@ fn spawn_failure_notice(
     batch: &FlushBatch,
     content: String,
 ) {
-    if let Some(rest) = rest_client {
-        let thread_tags = batch
-            .events
-            .last()
-            .map(|be| queue::parse_thread_tags(&be.event))
-            .unwrap_or_default();
-        let rest = rest.clone();
-        let channel_id = batch.channel_id;
-        tokio::spawn(async move {
-            pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
-        });
-    }
+    let thread_tags = batch
+        .events
+        .last()
+        .map(|be| queue::parse_thread_tags(&be.event))
+        .unwrap_or_default();
+    spawn_channel_notice(rest_client, batch.channel_id, thread_tags, content);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5464,7 +5520,7 @@ mod error_outcome_emission_tests {
     use crate::pool::{
         AgentPool, OwnedAgent, PromptOutcome, PromptResult, PromptSource, TimeoutKind,
     };
-    use crate::queue::{BatchEvent, FlushBatch};
+    use crate::queue::{BatchEvent, FlushBatch, FormatPromptArgs};
     use nostr::{EventBuilder, Keys, Kind};
     use std::collections::HashSet;
 
@@ -6374,6 +6430,125 @@ mod error_outcome_emission_tests {
         );
     }
 
+    /// Clean cancel+merge (`PromptOutcome::Cancelled`): original in-flight
+    /// batch is requeued as cancelled and merged with the incoming event
+    /// already released by the steer-ack handler. `format_prompt` is the
+    /// string the agent actually receives — both events must appear there,
+    /// not merely inside the queue internals.
+    #[tokio::test]
+    async fn cancelled_prompt_redelivers_original_event_to_agent_prompt() {
+        let keys = Keys::generate();
+        let original_event = EventBuilder::new(Kind::Custom(9), "original in-flight work")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let new_event = EventBuilder::new(Kind::Custom(9), "incoming steer message")
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_ne!(original_event.id, new_event.id);
+        let channel_id = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event: original_event.clone(),
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: Some(CancelReason::Steer),
+        };
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue.push(QueuedEvent {
+            channel_id,
+            event: new_event.clone(),
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        });
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Cancelled,
+            batch: Some(batch),
+            produced_message: false,
+            produced_file: false,
+        };
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            None,
+            None,
+            "test-agent",
+        );
+
+        let requeued = queue.flush_next().expect("cancelled batch must re-flush");
+        assert_eq!(requeued.events.len(), 1);
+        assert_eq!(requeued.events[0].event.id, new_event.id);
+        assert_eq!(requeued.cancelled_events.len(), 1);
+        assert_eq!(requeued.cancelled_events[0].event.id, original_event.id);
+        assert_eq!(requeued.cancel_reason, Some(CancelReason::Steer));
+
+        let prompt = queue::format_prompt(&requeued, &FormatPromptArgs::default()).join("\n\n");
+        assert!(
+            prompt.contains("original in-flight work"),
+            "original cancelled prompt must reach the agent: {prompt}"
+        );
+        assert!(
+            prompt.contains("incoming steer message"),
+            "incoming message must reach the agent: {prompt}"
+        );
+
+        assert_eq!(
+            pool.live_count(),
+            1,
+            "Cancelled returns a healthy agent to the pool"
+        );
+        assert_eq!(respawn_tasks.len(), 0, "Cancelled must not respawn");
+        assert_eq!(
+            observer
+                .snapshot()
+                .iter()
+                .filter(|e| e.kind == "turn_error")
+                .count(),
+            0,
+            "Cancelled must stay off the turn_error feed"
+        );
+    }
+
     /// Explicit Stop (`ControlSignal::Cancel`) on cancel-drain expiry drops
     /// the triggering batch — `requeue_cancelled_batch` returns `None` for
     /// `Cancel`/`Rotate`. The observer payload must be the SAME fate-neutral
@@ -6724,6 +6899,91 @@ mod error_outcome_emission_tests {
             1,
             "non-auth application error must preserve the event for retry"
         );
+    }
+}
+
+#[cfg(test)]
+mod cancel_merge_fallback_notice_tests {
+    //! Pins the cancel+merge fallback channel notice (WO #301).
+    //!
+    //! `channel_notices_for_steer_ack` is the same function the
+    //! `SteerAckEvent` handler iterates when posting — counting these
+    //! strings counts what would be posted to the channel. The Success
+    //! path stays empty: this WO does not touch non-cancelling steer.
+
+    use super::*;
+
+    fn notice_count(ack: pool::SteerAck) -> usize {
+        channel_notices_for_steer_ack(&Ok(ack), "Cursor").len()
+    }
+
+    #[test]
+    fn cancel_merge_fallback_posts_exactly_one_channel_notice_per_fallback_event() {
+        assert_eq!(
+            notice_count(pool::SteerAck::Err(
+                pool::SteerError::ExpectedRunIdMissing
+            )),
+            1,
+            "ExpectedRunIdMissing (adapter without _session/steering) must post once"
+        );
+        assert_eq!(
+            notice_count(pool::SteerAck::Err(pool::SteerError::Transport(
+                "write failed".into()
+            ))),
+            1
+        );
+        assert_eq!(
+            notice_count(pool::SteerAck::Err(pool::SteerError::OutcomeRejected {
+                outcome: "failed".into()
+            })),
+            1
+        );
+        assert_eq!(
+            notice_count(pool::SteerAck::Err(pool::SteerError::AgentError {
+                code: -32601,
+                message: "Method not found".into()
+            })),
+            1,
+            "method_not_found must fall back and post once"
+        );
+
+        assert_eq!(
+            notice_count(pool::SteerAck::Success),
+            0,
+            "native steer Success must stay silent"
+        );
+        assert_eq!(notice_count(pool::SteerAck::PromptCompletedNeutral), 0);
+        assert_eq!(
+            notice_count(pool::SteerAck::Err(pool::SteerError::AgentError {
+                code: -32602,
+                message: "Invalid params".into()
+            })),
+            0,
+            "application-level AgentError must not cancel or post"
+        );
+    }
+
+    #[test]
+    fn cancel_merge_fallback_notice_names_seat_and_incoming_cancel() {
+        let notices = channel_notices_for_steer_ack(
+            &Ok(pool::SteerAck::Err(
+                pool::SteerError::ExpectedRunIdMissing
+            )),
+            "Cursor",
+        );
+        assert_eq!(notices.len(), 1);
+        assert_eq!(
+            notices[0],
+            "Cursor's in-flight turn was cancelled by an incoming message."
+        );
+    }
+
+    #[test]
+    fn steer_ack_success_disposition_is_unchanged() {
+        let (release, drop, fallback) = steer_ack_disposition(&Ok(pool::SteerAck::Success));
+        assert!(!release, "Success must not release the withheld event");
+        assert!(drop, "Success must drop the withheld event");
+        assert!(!fallback, "Success must not fire cancel+merge");
     }
 }
 
