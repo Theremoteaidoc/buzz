@@ -654,6 +654,11 @@ impl HeartbeatRegistry {
                 return None;
             }
 
+            let due = seat
+                .last_emit_at
+                .map(|t| now.duration_since(t).unwrap_or_default() >= self.cadence)
+                .unwrap_or(true);
+
             let active = matches!(
                 seat.state,
                 HeartbeatState::Claimed
@@ -672,15 +677,15 @@ impl HeartbeatRegistry {
             } else if active && self.should_stall(seat, now) {
                 Some(("stalled", HeartbeatState::Stalled))
             } else if active {
-                let due = seat
-                    .last_emit_at
-                    .map(|t| now.duration_since(t).unwrap_or_default() >= self.cadence)
-                    .unwrap_or(true);
                 if due {
                     Some(("emit", seat.state))
                 } else {
                     None
                 }
+            } else if due && seat.state != HeartbeatState::Idle {
+                Some(("idle", HeartbeatState::Idle))
+            } else if due {
+                Some(("emit_idle", HeartbeatState::Idle))
             } else {
                 None
             }
@@ -691,7 +696,9 @@ impl HeartbeatRegistry {
             Some(("stalled", _)) => {
                 self.set_state(agent, HeartbeatState::Stalled, "stalled", None, now)
             }
+            Some(("idle", _)) => self.set_state(agent, HeartbeatState::Idle, "idle", None, now),
             Some(("emit", _)) => self.emit_now(agent, now),
+            Some(("emit_idle", _)) => self.emit_now(agent, now),
             _ => None,
         }
     }
@@ -1458,6 +1465,104 @@ mod tests {
             .expect("cadence emit");
         assert_eq!(emitted.elapsed_in_phase_secs, cadence.as_secs());
         assert_eq!(file_elapsed(&status_path), cadence.as_secs());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn idle_tick_advances_status_mtime_and_emits_idle() {
+        let dir = std::env::temp_dir().join(format!(
+            "buzz-acp-wo349-idle-heartbeat-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let status_path = dir.join("status.json");
+
+        let cadence = Duration::from_millis(1);
+        let mut reg = HeartbeatRegistry::new(STALL_AFTER_DEFAULT, cadence);
+        reg.set_status_path(&status_path);
+        reg.register_identity("sprig", IdentityClass::AgentSeat, t0());
+        let initial = reg.emit_initial("sprig", t0()).expect("startup emit");
+        assert_eq!(initial.state, HeartbeatState::AgentInitialized);
+        let first_mtime = std::fs::metadata(&status_path)
+            .expect("startup status file")
+            .modified()
+            .expect("startup mtime");
+
+        std::thread::sleep(Duration::from_millis(20));
+
+        let later = t0() + cadence;
+        let emitted = reg.tick("sprig", later).expect("idle cadence emit");
+        let second_mtime = std::fs::metadata(&status_path)
+            .expect("idle status file")
+            .modified()
+            .expect("idle mtime");
+
+        assert_eq!(emitted.state, HeartbeatState::Idle);
+        assert_eq!(emitted.phase, "idle");
+        assert!(emitted.turn_id.is_none(), "idle heartbeat clears turn identity");
+        assert!(
+            second_mtime > first_mtime,
+            "idle cadence tick must rewrite the status file so mtime advances"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn in_flight_tick_advances_status_mtime_without_new_mutation() {
+        let dir = std::env::temp_dir().join(format!(
+            "buzz-acp-wo349-running-heartbeat-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let status_path = dir.join("status.json");
+
+        let cadence = Duration::from_millis(1);
+        let t_start = t0();
+        let t_tool = t_start + Duration::from_secs(5);
+        let t_tick = t_start + Duration::from_secs(95);
+        let mut reg = HeartbeatRegistry::new(STALL_AFTER_DEFAULT, cadence);
+        reg.set_status_path(&status_path);
+        reg.register_identity("sprig", IdentityClass::AgentSeat, t_start);
+        let _ = reg.set_state(
+            "sprig",
+            HeartbeatState::Running,
+            "running",
+            Some("turn-349".into()),
+            t_start,
+        );
+        reg.record_mutation(
+            "sprig",
+            MutationKind::Message,
+            "tool_call:Shell",
+            t_tool,
+        );
+        let first_mtime = std::fs::metadata(&status_path)
+            .expect("running status file")
+            .modified()
+            .expect("running mtime");
+
+        std::thread::sleep(Duration::from_millis(20));
+
+        reg.touch_alive("sprig", t_tick);
+        let emitted = reg.tick("sprig", t_tick).expect("running cadence emit");
+        let second_mtime = std::fs::metadata(&status_path)
+            .expect("refreshed status file")
+            .modified()
+            .expect("refreshed mtime");
+
+        assert_eq!(emitted.state, HeartbeatState::Running);
+        assert_eq!(emitted.phase, "running");
+        assert_eq!(emitted.turn_id.as_deref(), Some("turn-349"));
+        assert_eq!(emitted.elapsed_in_phase_secs, 95);
+        assert_eq!(emitted.last_mutation_at, Some(system_time_secs(t_tool)));
+        assert!(
+            second_mtime > first_mtime,
+            "in-flight cadence tick must rewrite the status file even without a new mutation"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
