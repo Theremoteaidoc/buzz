@@ -13,6 +13,7 @@ mod queue;
 mod relay;
 mod setup_mode;
 mod usage;
+mod wip_checkpoint;
 
 pub use agent_heartbeat::{
     classify_identity, classify_ok_turn_outcome, classify_tool_mutation, dead_after_for,
@@ -27,6 +28,10 @@ pub use liveness_watcher::{
     RosterSeat, SeatObservation, UnitState, WatcherReport, DEFAULT_HEARTBEAT_DIR,
 };
 pub use usage::TurnUsage;
+pub use wip_checkpoint::{
+    latest_wip_bundle, maybe_drop_wip, resume_wip_hint, split_empty_outcome, EmptyOutcomeKind,
+    WIP_CHECKPOINT_INTERVAL,
+};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -3465,20 +3470,22 @@ fn handle_prompt_result(
         result.agent.state.invalidate_channel(ch);
     }
 
-    let outcome_label: &'static str = match &result.outcome {
-        PromptOutcome::Ok(_) => match classify_ok_turn_outcome(
-            result.produced_message,
-            result.produced_file,
-        ) {
-            TurnOutcomeLabel::Ok => "ok",
-            TurnOutcomeLabel::ReturnedEmpty => "returned_empty",
+    let outcome_label: &'static str = match split_empty_outcome(
+        &result.outcome,
+        result.produced_message,
+        result.produced_file,
+    ) {
+        Some(kind) => kind.as_str(),
+        None => match &result.outcome {
+            PromptOutcome::Ok(_) => "ok",
+            PromptOutcome::Cancelled => "cancelled",
+            PromptOutcome::CancelDrainTimeout(_) => "cancel_drain_timeout",
+            // Exhaustiveness: split_empty_outcome covers Timeout/AgentExited/Error
+            // and Ok-empty; remaining Ok-with-output / cancel arms above.
+            PromptOutcome::Error(_)
+            | PromptOutcome::Timeout(_)
+            | PromptOutcome::AgentExited => unreachable!("split_empty_outcome covers this arm"),
         },
-        PromptOutcome::Error(_) => "error",
-        PromptOutcome::Timeout(TimeoutKind::Idle) => "idle_timeout",
-        PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "hard_timeout",
-        PromptOutcome::AgentExited => "exited",
-        PromptOutcome::Cancelled => "cancelled",
-        PromptOutcome::CancelDrainTimeout(_) => "cancel_drain_timeout",
     };
     let agent_index = result.agent.index;
     // Capture the spawn-time configured model and our PID before the agent is
@@ -3528,21 +3535,21 @@ fn handle_prompt_result(
             );
             if let Some(hb) = agent_heartbeat.as_deref_mut() {
                 let now = std::time::SystemTime::now();
-                let state = if outcome_label == "returned_empty" {
-                    HeartbeatState::ReturnedEmpty
+                let state = if outcome_label == "empty" {
+                    HeartbeatState::Empty
                 } else {
                     HeartbeatState::Returned
                 };
-                let phase = if outcome_label == "returned_empty" {
-                    "returned_empty"
+                let phase = if outcome_label == "empty" {
+                    "empty"
                 } else {
                     "returned"
                 };
-                if outcome_label == "returned_empty" {
+                if outcome_label == "empty" {
                     tracing::warn!(
                         agent = agent_index,
                         turn_id = %turn_id,
-                        "turn returned with no message and no file — recording returned_empty"
+                        "turn returned with no message and no file — recording empty"
                     );
                 }
                 if result.produced_message {
@@ -3567,6 +3574,8 @@ fn handle_prompt_result(
             pool.return_agent(result.agent);
         }
         // Fatal outcomes: the agent subprocess is dead or poisoned — respawn it.
+        // WO #691: record the four-way empty-outcome HeartbeatState (not a
+        // collapsed returned_empty / generic dead) before respawn.
         PromptOutcome::AgentExited | PromptOutcome::Timeout(_) => {
             tracing::warn!(
                 agent = agent_index,
@@ -3576,11 +3585,17 @@ fn handle_prompt_result(
                 "agent_returned — respawning"
             );
             if let Some(hb) = agent_heartbeat.as_deref_mut() {
-                let _ = hb.mark_dead(agent_label, std::time::SystemTime::now());
+                let now = std::time::SystemTime::now();
+                let (state, phase) = match outcome_label {
+                    "killed_turn_cap" => (HeartbeatState::KilledTurnCap, "killed_turn_cap"),
+                    "killed_idle" => (HeartbeatState::KilledIdle, "killed_idle"),
+                    _ => (HeartbeatState::Crashed, "crashed"),
+                };
+                let _ = hb.set_state(agent_label, state, phase, Some(turn_id.clone()), now);
             }
             let death_message: String = match outcome_label {
-                "exited" => "Agent process exited unexpectedly".to_string(),
-                "hard_timeout" => {
+                "crashed" => "Agent process exited unexpectedly".to_string(),
+                "killed_turn_cap" => {
                     // Neutral wording when no fate was recorded above: a
                     // heartbeat hard timeout carries no batch at all, so
                     // nothing was requeued or dead-lettered.
@@ -3697,6 +3712,15 @@ fn handle_prompt_result(
                     error = %e,
                     "transport/protocol error — respawning agent"
                 );
+                if let Some(hb) = agent_heartbeat.as_deref_mut() {
+                    let _ = hb.set_state(
+                        agent_label,
+                        HeartbeatState::Crashed,
+                        "crashed",
+                        Some(turn_id.clone()),
+                        std::time::SystemTime::now(),
+                    );
+                }
                 emit_turn_error(&e.to_string(), error_code);
 
                 let index = result.agent.index;
@@ -3723,6 +3747,15 @@ fn handle_prompt_result(
                     error = %e,
                     "agent_returned (application error — pipe intact)"
                 );
+                if let Some(hb) = agent_heartbeat.as_deref_mut() {
+                    let _ = hb.set_state(
+                        agent_label,
+                        HeartbeatState::Crashed,
+                        "crashed",
+                        Some(turn_id.clone()),
+                        std::time::SystemTime::now(),
+                    );
+                }
                 emit_turn_error(&e.to_string(), error_code);
                 pool.return_agent(result.agent);
             }
@@ -5786,10 +5819,9 @@ mod error_outcome_emission_tests {
         );
     }
 
-    /// idle_timeout outcome_label is "idle_timeout"; hard_timeout is "hard_timeout".
-    /// WO #146: a turn that exceeds the original hard Instant is recorded as
-    /// the `hard_timeout` outcome (the ratchet on "the cap fired but nobody
-    /// noticed").
+    /// WO #691: hard/idle timeouts record killed_turn_cap / killed_idle (not
+    /// the collapsed returned_empty label, and not the old idle_timeout /
+    /// hard_timeout strings).
     #[tokio::test]
     async fn timeout_outcome_labels_differ() {
         let check_label = |outcome: PromptOutcome, expected_label: &'static str| async move {
@@ -5850,12 +5882,12 @@ mod error_outcome_emission_tests {
                 expected_label
             );
         };
-        check_label(PromptOutcome::Timeout(TimeoutKind::Idle), "idle_timeout").await;
+        check_label(PromptOutcome::Timeout(TimeoutKind::Idle), "killed_idle").await;
         check_label(
             PromptOutcome::Timeout(TimeoutKind::Hard {
                 recently_active: false,
             }),
-            "hard_timeout",
+            "killed_turn_cap",
         )
         .await;
         check_label(
@@ -5863,6 +5895,77 @@ mod error_outcome_emission_tests {
             "cancel_drain_timeout",
         )
         .await;
+    }
+
+    /// WO #691: hard-cap kill records killed_turn_cap; idle kill records
+    /// killed_idle — never the collapsed returned_empty label.
+    #[tokio::test]
+    async fn empty_outcome_timeout_labels_are_killed_not_returned_empty() {
+        let check = |outcome: PromptOutcome, expected: &'static str| async move {
+            let agent = dummy_agent(0).await;
+            let mut pool = AgentPool::from_slots(vec![None]);
+            let task_id = pool.join_set.spawn(async {}).id();
+            pool.task_map_mut().insert(
+                task_id,
+                crate::pool::TaskMeta {
+                    agent_index: 0,
+                    channel_id: None,
+                    turn_id: "test-turn-id".to_string(),
+                    recoverable_batch: None,
+                    control_tx: None,
+                    steer_tx: None,
+                },
+            );
+            let mut queue = EventQueue::new(config::DedupMode::Queue);
+            let config = test_config();
+            let mut heartbeat_in_flight = false;
+            let removed_channels = HashSet::new();
+            let mut crash_history = vec![SlotCircuit {
+                crash_times: Vec::new(),
+                open_until: None,
+                respawn_in_flight: false,
+            }];
+            let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+            let mut respawn_tasks = tokio::task::JoinSet::new();
+            let observer = ObserverHandle::in_process();
+            let result = PromptResult {
+                agent,
+                source: PromptSource::Channel(Uuid::new_v4()),
+                turn_id: "test-turn-id".to_string(),
+                outcome,
+                batch: None,
+                produced_message: false,
+                produced_file: false,
+            };
+            handle_prompt_result(
+                &mut pool,
+                &mut queue,
+                &config,
+                result,
+                &mut heartbeat_in_flight,
+                &removed_channels,
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                Some(observer.clone()),
+                None,
+                None,
+                "test-agent",
+            );
+            let events = observer.snapshot();
+            let turn_error = events.iter().find(|e| e.kind == "turn_error").unwrap();
+            let label = turn_error.payload["outcome"].as_str().unwrap();
+            assert_eq!(label, expected);
+            assert_ne!(label, "returned_empty");
+        };
+        check(
+            PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: true,
+            }),
+            "killed_turn_cap",
+        )
+        .await;
+        check(PromptOutcome::Timeout(TimeoutKind::Idle), "killed_idle").await;
     }
 
     /// hard-cap timeout dead-letters immediately (no requeue); idle timeout is requeued.

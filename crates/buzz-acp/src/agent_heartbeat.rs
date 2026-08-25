@@ -1,8 +1,9 @@
 //! Agent heartbeat + progress signal (WO #133 / R2.1).
 //!
 //! Liveness is not progress. A process can be alive while writing nothing;
-//! this module distinguishes `running` / `stalled` / `dead` / `returned_empty`
-//! and keeps a founder-readable snapshot separate from agent-only logs.
+//! this module distinguishes `running` / `stalled` / `dead` / empty-outcome
+//! labels (`killed_turn_cap` / `killed_idle` / `crashed` / `empty`) and keeps
+//! a founder-readable snapshot separate from agent-only logs.
 //!
 //! Identity is three-way: agent seats (full model), cron/notify keys (excluded),
 //! and human-backed sessions (visible, never stalled/dead as agents).
@@ -88,8 +89,14 @@ pub enum HeartbeatState {
     /// `touch_alive` is *not* wired on the same loop — missed-seen past
     /// `dead_after`. The self-heartbeat harness cannot observe its own wedge.
     Dead,
-    /// Turn ended ok with neither message nor file.
-    ReturnedEmpty,
+    /// Hard turn-cap killed the turn before durable output (WO #691).
+    KilledTurnCap,
+    /// Idle timeout killed the turn before durable output (WO #691).
+    KilledIdle,
+    /// Agent exited or errored with no durable output (WO #691).
+    Crashed,
+    /// ACP-ok turn with neither message nor file (WO #691; was `returned_empty`).
+    Empty,
 }
 
 impl HeartbeatState {
@@ -103,7 +110,10 @@ impl HeartbeatState {
             Self::Returned => "returned",
             Self::Stalled => "stalled",
             Self::Dead => "dead",
-            Self::ReturnedEmpty => "returned_empty",
+            Self::KilledTurnCap => "killed_turn_cap",
+            Self::KilledIdle => "killed_idle",
+            Self::Crashed => "crashed",
+            Self::Empty => "empty",
         }
     }
 }
@@ -119,6 +129,8 @@ impl TurnOutcomeLabel {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Ok => "ok",
+            // Kept for classify_ok_turn_outcome callers; harness maps this
+            // through split_empty_outcome → EmptyOutcomeKind::Empty ("empty").
             Self::ReturnedEmpty => "returned_empty",
         }
     }
@@ -813,7 +825,10 @@ impl HeartbeatRegistry {
             IdentityClass::AgentSeat => match seat.state {
                 HeartbeatState::Dead => Some("dead"),
                 HeartbeatState::Stalled => Some("stalled"),
-                HeartbeatState::ReturnedEmpty => Some("returned_empty"),
+                HeartbeatState::KilledTurnCap => Some("killed_turn_cap"),
+                HeartbeatState::KilledIdle => Some("killed_idle"),
+                HeartbeatState::Crashed => Some("crashed"),
+                HeartbeatState::Empty => Some("empty"),
                 HeartbeatState::Running | HeartbeatState::Claimed | HeartbeatState::Blocked
                     if self.should_stall(seat, now) =>
                 {
@@ -1043,7 +1058,7 @@ mod tests {
         assert!(at_stall.duration_since(t0()).unwrap() < reg.dead_after());
     }
 
-    /// Turn returns ok with no message/file → recorded `returned_empty`.
+    /// Turn returns ok with no message/file → recorded `empty` (WO #691).
     #[test]
     fn turn_outcome_returned_empty() {
         assert_eq!(
@@ -1069,13 +1084,22 @@ mod tests {
         let payload = reg
             .set_state(
                 "firstmate",
-                HeartbeatState::ReturnedEmpty,
-                "returned_empty",
+                HeartbeatState::Empty,
+                "empty",
                 Some("turn-e13".into()),
                 t0(),
             )
             .expect("emit");
-        assert_eq!(payload.state.as_str(), "returned_empty");
+        assert_eq!(payload.state.as_str(), "empty");
+    }
+
+    /// WO #691: HeartbeatState as_str covers all four empty-outcome kinds.
+    #[test]
+    fn test_heartbeat_state_as_str_covers_all_four_empty_kinds() {
+        assert_eq!(HeartbeatState::KilledTurnCap.as_str(), "killed_turn_cap");
+        assert_eq!(HeartbeatState::KilledIdle.as_str(), "killed_idle");
+        assert_eq!(HeartbeatState::Crashed.as_str(), "crashed");
+        assert_eq!(HeartbeatState::Empty.as_str(), "empty");
     }
 
     /// Unmatched event dropped → counter increments with reason.
