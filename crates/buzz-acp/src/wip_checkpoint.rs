@@ -13,6 +13,14 @@ use crate::pool::{PromptOutcome, TimeoutKind};
 /// Wall-clock interval between periodic WIP bundle drops.
 pub const WIP_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Relative path under an agent work dir where WIP bundles are written.
+/// Branch-watcher only processes `<persona>/OUTBOX/branch/request.go` (WO #364);
+/// this path must stay outside that glob (WO #691 acceptance).
+pub const WIP_OUTBOX_REL: &str = "OUTBOX/wip";
+
+/// Branch-watcher request trigger suffix (SSOT: scripts/ops/factory-ci1/branch-watcher).
+pub const BRANCH_WATCHER_REQUEST_SUFFIX: &str = "OUTBOX/branch/request.go";
+
 /// Refined empty-turn cause. Replaces the collapsed `returned_empty` label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmptyOutcomeKind {
@@ -316,6 +324,22 @@ mod tests {
 
     /// Acceptance: a turn killed at minute 25 has a bundle no older than 5
     /// minutes, and the resume hint references that bundle.
+    #[test]
+    /// Negative test: wip/ bundles must not match the branch-watcher glob.
+    #[test]
+    fn test_wip_outbox_path_outside_branch_watcher_glob() {
+        let wip_bundle = format!("{}/checkpoint.bundle", WIP_OUTBOX_REL);
+        assert!(
+            !wip_bundle.ends_with(BRANCH_WATCHER_REQUEST_SUFFIX),
+            "wip bundles must not match branch-watcher trigger path"
+        );
+        assert!(
+            !BRANCH_WATCHER_REQUEST_SUFFIX.contains("/wip"),
+            "branch-watcher glob must not include OUTBOX/wip"
+        );
+        assert_ne!(WIP_OUTBOX_REL, "OUTBOX/branch");
+    }
+
     #[test]
     fn test_kill_at_25_minutes_resumes_from_bundle_within_5_minutes() {
         let dir = tempfile_dir("kill-at-25");
