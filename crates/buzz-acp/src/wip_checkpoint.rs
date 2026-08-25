@@ -322,9 +322,6 @@ mod tests {
         assert!(latest_wip_bundle(&dir.join("missing")).is_none());
     }
 
-    /// Acceptance: a turn killed at minute 25 has a bundle no older than 5
-    /// minutes, and the resume hint references that bundle.
-    #[test]
     /// Negative test: wip/ bundles must not match the branch-watcher glob.
     #[test]
     fn test_wip_outbox_path_outside_branch_watcher_glob() {
@@ -340,6 +337,8 @@ mod tests {
         assert_ne!(WIP_OUTBOX_REL, "OUTBOX/branch");
     }
 
+    /// Acceptance: a turn killed at minute 25 has a bundle no older than 5
+    /// minutes, and the resume hint references that bundle.
     #[test]
     fn test_kill_at_25_minutes_resumes_from_bundle_within_5_minutes() {
         let dir = tempfile_dir("kill-at-25");
