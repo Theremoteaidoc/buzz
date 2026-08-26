@@ -207,6 +207,8 @@ impl EventQueue {
     /// moves backward. If the channel is not in-flight (already completed
     /// via `mark_complete`), this is a no-op: a late ack never resurrects
     /// a deadline.
+    // Covered by unit tests; production steer call site is not wired yet.
+    #[allow(dead_code)]
     pub fn extend_in_flight_deadline(&mut self, channel_id: Uuid, max_turn_secs: u64) {
         if let Some(current) = self.in_flight_deadlines.get_mut(&channel_id) {
             let extended = Instant::now()

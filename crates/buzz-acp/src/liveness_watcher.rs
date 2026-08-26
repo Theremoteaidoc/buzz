@@ -380,14 +380,11 @@ pub fn discover_systemd_roster() -> std::io::Result<Vec<RosterSeat>> {
         .output()?;
 
     if !output.status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!(
-                "systemctl roster discovery failed (exit {:?}): {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr)
-            ),
-        ));
+        return Err(std::io::Error::other(format!(
+            "systemctl roster discovery failed (exit {:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);

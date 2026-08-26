@@ -471,7 +471,7 @@ impl HeartbeatRegistry {
             "dead_after ({dead_after:?}) must be strictly greater than stall_after ({stall_after:?})"
         );
         debug_assert!(
-            dead_after.as_nanos() % cadence.as_nanos() == 0,
+            dead_after.as_nanos().is_multiple_of(cadence.as_nanos()),
             "dead_after must be a multiple of cadence"
         );
         Self {
@@ -566,9 +566,7 @@ impl HeartbeatRegistry {
         turn_id: Option<String>,
         now: SystemTime,
     ) -> Option<HeartbeatPayload> {
-        let Some(seat) = self.seats.get_mut(agent) else {
-            return None;
-        };
+        let seat = self.seats.get_mut(agent)?;
         if seat.identity == IdentityClass::CronNotify {
             return None;
         }
