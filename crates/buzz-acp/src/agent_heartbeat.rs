@@ -301,7 +301,12 @@ pub struct TurnProgress {
 }
 
 impl TurnProgress {
-    pub fn record_mutation(&mut self, kind: MutationKind, action: impl Into<String>, at: SystemTime) {
+    pub fn record_mutation(
+        &mut self,
+        kind: MutationKind,
+        action: impl Into<String>,
+        at: SystemTime,
+    ) {
         match kind {
             MutationKind::Message => self.produced_message = true,
             MutationKind::File => self.produced_file = true,
@@ -505,7 +510,12 @@ impl HeartbeatRegistry {
         &self.drops
     }
 
-    pub fn register_identity(&mut self, agent: impl Into<String>, identity: IdentityClass, now: SystemTime) {
+    pub fn register_identity(
+        &mut self,
+        agent: impl Into<String>,
+        identity: IdentityClass,
+        now: SystemTime,
+    ) {
         let agent = agent.into();
         self.seats
             .entry(agent)
@@ -655,11 +665,7 @@ impl HeartbeatRegistry {
                     .last_emit_at
                     .map(|t| now.duration_since(t).unwrap_or_default() >= self.cadence)
                     .unwrap_or(true);
-                return if due {
-                    self.emit_now(agent, now)
-                } else {
-                    None
-                };
+                return if due { self.emit_now(agent, now) } else { None };
             }
 
             if !seat.alive || seat.state == HeartbeatState::Dead {
@@ -681,9 +687,7 @@ impl HeartbeatRegistry {
 
             // Missed-seen past dead_after (multiple of cadence > stall_after).
             // Latent unless touch_alive is withheld (out-of-process / rewire).
-            let since_seen = now
-                .duration_since(seat.last_seen_at)
-                .unwrap_or_default();
+            let since_seen = now.duration_since(seat.last_seen_at).unwrap_or_default();
             if active && since_seen > self.dead_after {
                 Some(("dead", HeartbeatState::Dead))
             } else if active && self.should_stall(seat, now) {
@@ -734,9 +738,7 @@ impl HeartbeatRegistry {
         ) {
             return false;
         }
-        let anchor = seat
-            .last_mutation_at
-            .unwrap_or(seat.phase_entered_at);
+        let anchor = seat.last_mutation_at.unwrap_or(seat.phase_entered_at);
         now.duration_since(anchor).unwrap_or_default() >= self.stall_after
             && seat.state != HeartbeatState::Stalled
     }
@@ -896,11 +898,7 @@ pub fn classify_identity(name: &str, has_buzz_agent_service: bool) -> IdentityCl
         return IdentityClass::CronNotify;
     }
     // Human-backed orchestrator session (Factory), not cron and not an agent seat.
-    if n == "factory"
-        || n == "factory.key"
-        || n.ends_with("/factory.key")
-        || n == "@factory"
-    {
+    if n == "factory" || n == "factory.key" || n.ends_with("/factory.key") || n == "@factory" {
         return IdentityClass::HumanBackedSession;
     }
     if n.ends_with(".key") {
@@ -960,12 +958,16 @@ mod tests {
         reg.touch_alive("firstmate", mid);
         let after_stall = t0() + stall_after + Duration::from_secs(1);
         reg.touch_alive("firstmate", after_stall);
-        let payload = reg
-            .tick("firstmate", after_stall)
-            .expect("stall emit");
+        let payload = reg.tick("firstmate", after_stall).expect("stall emit");
         assert_eq!(payload.state, HeartbeatState::Stalled);
-        assert_ne!(reg.liveness_label("firstmate", after_stall), Some("healthy"));
-        assert_eq!(reg.liveness_label("firstmate", after_stall), Some("stalled"));
+        assert_ne!(
+            reg.liveness_label("firstmate", after_stall),
+            Some("healthy")
+        );
+        assert_eq!(
+            reg.liveness_label("firstmate", after_stall),
+            Some("stalled")
+        );
     }
 
     /// L1 tripwire (B1): long turn with periodic durable writes stays running.
@@ -1112,7 +1114,10 @@ mod tests {
         assert_eq!(reg.dropped_events().total(), 3);
         assert_eq!(reg.dropped_events().count_for("matched_no_rule"), 2);
         assert_eq!(reg.dropped_events().count_for("self_authored"), 1);
-        assert!(reg.dropped_events().reasons().contains_key("matched_no_rule"));
+        assert!(reg
+            .dropped_events()
+            .reasons()
+            .contains_key("matched_no_rule"));
     }
 
     /// Non-agent identity never counted stalled/dead; human-backed is its own class.
@@ -1144,7 +1149,9 @@ mod tests {
         assert!(reg
             .set_state("cron.key", HeartbeatState::Running, "running", None, t0())
             .is_none());
-        assert!(reg.tick("cron.key", t0() + Duration::from_secs(10)).is_none());
+        assert!(reg
+            .tick("cron.key", t0() + Duration::from_secs(10))
+            .is_none());
         assert!(reg.mark_dead("cron.key", t0()).is_none());
         assert!(reg.payload_for("cron.key", t0()).is_none());
         assert_eq!(reg.liveness_label("cron.key", t0()), None);
@@ -1190,7 +1197,10 @@ mod tests {
             Some(MutationKind::File)
         );
         assert_eq!(classify_tool_mutation("Read", "read"), None);
-        assert_eq!(classify_tool_mutation("agent_message_chunk", "stream"), None);
+        assert_eq!(
+            classify_tool_mutation("agent_message_chunk", "stream"),
+            None
+        );
     }
 
     /// Object-shaped ACP rawInput (the common Cursor/Codex Shell shape) must
@@ -1268,10 +1278,7 @@ mod tests {
     /// write; `emit_initial` must produce the watcher-shaped snapshot.
     #[test]
     fn startup_emit_writes_status_file_before_any_turn() {
-        let dir = std::env::temp_dir().join(format!(
-            "buzz-acp-wo148-hb-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("buzz-acp-wo148-hb-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp heartbeat dir");
         let status_path = dir.join("codex.json");
@@ -1303,8 +1310,7 @@ mod tests {
             "status file must exist before any turn"
         );
         let body = std::fs::read_to_string(&status_path).expect("read status");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&body).expect("status JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("status JSON");
         let seat = parsed
             .as_array()
             .and_then(|a| a.first())
@@ -1332,10 +1338,7 @@ mod tests {
     /// tell "seat up, heartbeat broken" from "no heartbeat yet".
     #[test]
     fn emit_surfaces_status_write_failure() {
-        let base = std::env::temp_dir().join(format!(
-            "buzz-acp-wo150-hb-{}",
-            std::process::id()
-        ));
+        let base = std::env::temp_dir().join(format!("buzz-acp-wo150-hb-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).expect("temp base dir");
         // Make the status path's parent a *file* so create_dir_all/write fail
@@ -1423,10 +1426,8 @@ mod tests {
     /// the same elapsed is the 75s emit window, not a frozen SystemTime.
     #[test]
     fn elapsed_in_phase_is_live_and_cadence_sampled_on_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "buzz-acp-wo146-elapsed-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("buzz-acp-wo146-elapsed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         let status_path = dir.join("status.json");
@@ -1484,9 +1485,7 @@ mod tests {
 
         let t_cadence = t0() + cadence;
         reg.touch_alive("firstmate", t_cadence);
-        let emitted = reg
-            .tick("firstmate", t_cadence)
-            .expect("cadence emit");
+        let emitted = reg.tick("firstmate", t_cadence).expect("cadence emit");
         assert_eq!(emitted.elapsed_in_phase_secs, cadence.as_secs());
         assert_eq!(file_elapsed(&status_path), cadence.as_secs());
 
@@ -1525,7 +1524,10 @@ mod tests {
 
         assert_eq!(emitted.state, HeartbeatState::Idle);
         assert_eq!(emitted.phase, "idle");
-        assert!(emitted.turn_id.is_none(), "idle heartbeat clears turn identity");
+        assert!(
+            emitted.turn_id.is_none(),
+            "idle heartbeat clears turn identity"
+        );
         assert!(
             second_mtime > first_mtime,
             "idle cadence tick must rewrite the status file so mtime advances"
@@ -1558,12 +1560,7 @@ mod tests {
             Some("turn-349".into()),
             t_start,
         );
-        reg.record_mutation(
-            "sprig",
-            MutationKind::Message,
-            "tool_call:Shell",
-            t_tool,
-        );
+        reg.record_mutation("sprig", MutationKind::Message, "tool_call:Shell", t_tool);
         let first_mtime = std::fs::metadata(&status_path)
             .expect("running status file")
             .modified()
@@ -1594,10 +1591,7 @@ mod tests {
     /// Cron/notify keys stay excluded: emit_initial must not write for them.
     #[test]
     fn startup_emit_skips_cron_notify_identity() {
-        let dir = std::env::temp_dir().join(format!(
-            "buzz-acp-wo148-cron-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("buzz-acp-wo148-cron-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         let status_path = dir.join("cron.json");

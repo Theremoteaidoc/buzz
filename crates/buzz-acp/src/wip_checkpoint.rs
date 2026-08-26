@@ -127,7 +127,7 @@ pub fn latest_wip_bundle(wip_dir: &Path) -> Option<PathBuf> {
 /// Returns `None` when `work_dir/OUTBOX/wip/` has no bundles. Used by the
 /// prompt-task resume path in `pool.rs` (WO #691 slice 4).
 pub fn resume_wip_hint(work_dir: &Path) -> Option<String> {
-    let bundle = latest_wip_bundle(&work_dir.join("OUTBOX").join("wip"))?;
+    let bundle = latest_wip_bundle(&wip_dir(work_dir))?;
     Some(format!(
         "[WIP Resume]\nA prior turn left a checkpoint at `{}`. Resume from that \
          work-in-progress bundle — at most five minutes of progress may be missing. \
@@ -136,12 +136,28 @@ pub fn resume_wip_hint(work_dir: &Path) -> Option<String> {
     ))
 }
 
+/// True when `rel` is the branch-watcher trigger path (not a WIP bundle path).
+///
+/// Negative-acceptance helper for WO #691: WIP drops must never match this.
+pub fn is_branch_watcher_request(rel: &str) -> bool {
+    rel.ends_with(BRANCH_WATCHER_REQUEST_SUFFIX)
+}
+
+/// Resolve `work_dir/OUTBOX/wip` using [`WIP_OUTBOX_REL`] (keeps the const live
+/// outside `cfg(test)` so Windows `-D warnings` stays green).
+fn wip_dir(work_dir: &Path) -> PathBuf {
+    // Split on `/` so Windows does not embed a literal slash component.
+    WIP_OUTBOX_REL
+        .split('/')
+        .fold(work_dir.to_path_buf(), |acc, part| acc.join(part))
+}
+
 /// Write `OUTBOX/wip/<unix_ts>.bundle` under `work_dir`.
 ///
 /// Prefer a real `git bundle` when `work_dir` is a git checkout; otherwise
 /// write a minimal checkpoint marker so resume still has a selectable file.
 fn write_wip_bundle(work_dir: &Path) -> Option<PathBuf> {
-    let wip_dir = work_dir.join("OUTBOX").join("wip");
+    let wip_dir = wip_dir(work_dir);
     fs::create_dir_all(&wip_dir).ok()?;
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -191,7 +207,9 @@ mod tests {
             Some(EmptyOutcomeKind::KilledTurnCap)
         );
         assert_eq!(
-            split_empty_outcome(&outcome, false, false).unwrap().as_str(),
+            split_empty_outcome(&outcome, false, false)
+                .unwrap()
+                .as_str(),
             "killed_turn_cap"
         );
     }
@@ -204,7 +222,9 @@ mod tests {
             Some(EmptyOutcomeKind::KilledIdle)
         );
         assert_eq!(
-            split_empty_outcome(&outcome, false, false).unwrap().as_str(),
+            split_empty_outcome(&outcome, false, false)
+                .unwrap()
+                .as_str(),
             "killed_idle"
         );
     }
@@ -246,11 +266,7 @@ mod tests {
             None
         );
         assert_eq!(
-            split_empty_outcome(
-                &PromptOutcome::Cancelled,
-                false,
-                false
-            ),
+            split_empty_outcome(&PromptOutcome::Cancelled, false, false),
             None
         );
         assert_eq!(
@@ -310,7 +326,10 @@ mod tests {
         thread::sleep(StdDuration::from_millis(20));
         fs::write(&newer, b"newer").unwrap();
         let picked = latest_wip_bundle(&wip).expect("bundle");
-        assert_eq!(picked, newer, "must pick newest mtime, not alphabetical first");
+        assert_eq!(
+            picked, newer,
+            "must pick newest mtime, not alphabetical first"
+        );
     }
 
     #[test]
@@ -327,8 +346,12 @@ mod tests {
     fn test_wip_outbox_path_outside_branch_watcher_glob() {
         let wip_bundle = format!("{}/checkpoint.bundle", WIP_OUTBOX_REL);
         assert!(
-            !wip_bundle.ends_with(BRANCH_WATCHER_REQUEST_SUFFIX),
+            !is_branch_watcher_request(&wip_bundle),
             "wip bundles must not match branch-watcher trigger path"
+        );
+        assert!(
+            is_branch_watcher_request(BRANCH_WATCHER_REQUEST_SUFFIX),
+            "canonical request.go path must match"
         );
         assert!(
             !BRANCH_WATCHER_REQUEST_SUFFIX.contains("/wip"),

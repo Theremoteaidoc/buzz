@@ -29,8 +29,9 @@ pub use liveness_watcher::{
 };
 pub use usage::TurnUsage;
 pub use wip_checkpoint::{
-    latest_wip_bundle, maybe_drop_wip, resume_wip_hint, split_empty_outcome, EmptyOutcomeKind,
-    WIP_CHECKPOINT_INTERVAL,
+    is_branch_watcher_request, latest_wip_bundle, maybe_drop_wip, resume_wip_hint,
+    split_empty_outcome, EmptyOutcomeKind, BRANCH_WATCHER_REQUEST_SUFFIX, WIP_CHECKPOINT_INTERVAL,
+    WIP_OUTBOX_REL,
 };
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -3747,7 +3748,7 @@ fn handle_prompt_result(
                     error = %e,
                     "agent_returned (application error — pipe intact)"
                 );
-                if let Some(hb) = agent_heartbeat.as_deref_mut() {
+                if let Some(hb) = agent_heartbeat.as_mut() {
                     let _ = hb.set_state(
                         agent_label,
                         HeartbeatState::Crashed,
