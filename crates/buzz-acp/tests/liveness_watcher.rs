@@ -99,11 +99,7 @@ fn stale_mtime_active_unit_is_stale_never_dead() {
         .expect("touch");
     assert!(status.success());
 
-    let roster = vec![seat(
-        "buzz-agent@codex.service",
-        "codex",
-        UnitState::Active,
-    )];
+    let roster = vec![seat("buzz-agent@codex.service", "codex", UnitState::Active)];
     let report = build_report(
         "seascope-ci-1",
         dir.path(),
@@ -157,13 +153,15 @@ buzz-orchestrator.service    loaded active running
 ";
     let roster = parse_systemctl_roster(stdout);
     assert!(
-        roster.iter().any(|r| r.seat == "hermes"
-            && r.unit_state == UnitState::InactiveOrFailed),
+        roster
+            .iter()
+            .any(|r| r.seat == "hermes" && r.unit_state == UnitState::InactiveOrFailed),
         "failed hermes must remain on roster: {roster:?}"
     );
     assert!(
-        roster.iter().any(|r| r.seat == "firstmate"
-            && r.unit_state == UnitState::InactiveOrFailed),
+        roster
+            .iter()
+            .any(|r| r.seat == "firstmate" && r.unit_state == UnitState::InactiveOrFailed),
         "inactive firstmate must remain on roster: {roster:?}"
     );
 
@@ -215,11 +213,7 @@ fn future_mtime_is_unknown_alarms_not_healthy() {
         .expect("touch");
     assert!(status.success());
 
-    let roster = vec![seat(
-        "buzz-agent@codex.service",
-        "codex",
-        UnitState::Active,
-    )];
+    let roster = vec![seat("buzz-agent@codex.service", "codex", UnitState::Active)];
     let report = build_report(
         "seascope-ci-1",
         dir.path(),
@@ -318,8 +312,8 @@ fn watcher_impl_never_mentions_alive_refresh_api() {
     let forbidden = format!("{}{}", "touch_", "alive");
     let mut hits = Vec::new();
     for path in watcher_impl_sources() {
-        let body = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let body =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         for (i, line) in body.lines().enumerate() {
             if line.contains(&forbidden) {
                 hits.push(format!("{}:{}: {line}", path.display(), i + 1));

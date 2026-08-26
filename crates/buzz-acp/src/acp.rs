@@ -901,10 +901,7 @@ impl AcpClient {
 
     /// Install the mid-turn mutation sink used to advance the heartbeat
     /// registry during an in-flight turn (WO #133 B1).
-    pub fn set_mutation_sink(
-        &mut self,
-        sink: crate::agent_heartbeat::MidTurnMutationSink,
-    ) {
+    pub fn set_mutation_sink(&mut self, sink: crate::agent_heartbeat::MidTurnMutationSink) {
         self.mutation_sink = Some(sink);
     }
 
@@ -912,12 +909,7 @@ impl AcpClient {
     ///
     /// `rawInput` is ACP `unknown` — often an object `{"command":"…"}` — so we
     /// flatten it via [`crate::agent_heartbeat::tool_mutation_classify_blob`].
-    fn note_tool_call_mutation(
-        &mut self,
-        update: &serde_json::Value,
-        title: &str,
-        kind: &str,
-    ) {
+    fn note_tool_call_mutation(&mut self, update: &serde_json::Value, title: &str, kind: &str) {
         let content_text = update
             .pointer("/content/0/text")
             .and_then(|v| v.as_str())
@@ -934,12 +926,13 @@ impl AcpClient {
         );
         // Skip no-op updates that carry neither title nor input (status-only).
         if classify_blob.is_empty()
-            || (classify_blob == "tool" && update.get("rawInput").is_none() && content_text.is_empty())
+            || (classify_blob == "tool"
+                && update.get("rawInput").is_none()
+                && content_text.is_empty())
         {
             return;
         }
-        if let Some(mutation) =
-            crate::agent_heartbeat::classify_tool_mutation(&classify_blob, kind)
+        if let Some(mutation) = crate::agent_heartbeat::classify_tool_mutation(&classify_blob, kind)
         {
             let action = format!("tool_call:{title}");
             let now = std::time::SystemTime::now();
@@ -951,8 +944,7 @@ impl AcpClient {
                 sink.note(mutation, action, now);
             }
         } else if title != "tool" && title != "unknown" {
-            self.turn_progress
-                .note_action(format!("tool_call:{title}"));
+            self.turn_progress.note_action(format!("tool_call:{title}"));
         }
     }
 
@@ -1811,8 +1803,7 @@ impl AcpClient {
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 // ACP stream chunks are not Buzz publishes — do not count as mutations.
-                self.turn_progress
-                    .note_action("agent_message_chunk");
+                self.turn_progress.note_action("agent_message_chunk");
                 false
             }
             "tool_call" => {
@@ -3757,7 +3748,10 @@ mod tests {
             }
         });
         let _ = client.handle_session_update(&read_msg);
-        assert!(sink.take().is_none(), "Read must not count as durable write");
+        assert!(
+            sink.take().is_none(),
+            "Read must not count as durable write"
+        );
     }
 
     /// False-positive ratchet: Shell title + object rawInput with

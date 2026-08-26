@@ -13,10 +13,7 @@ fn t0() -> SystemTime {
 
 #[test]
 fn seat_startup_writes_status_before_any_inbound_dispatch() {
-    let dir = std::env::temp_dir().join(format!(
-        "buzz-acp-wo148-it-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("buzz-acp-wo148-it-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp heartbeat dir");
     let status_path = dir.join("hermes.json");
@@ -28,9 +25,7 @@ fn seat_startup_writes_status_before_any_inbound_dispatch() {
     // No inbound message / turn has been dispatched yet.
     assert!(!status_path.exists());
 
-    let payload = reg
-        .emit_initial("hermes", t0())
-        .expect("startup must emit");
+    let payload = reg.emit_initial("hermes", t0()).expect("startup must emit");
     assert_eq!(payload.state, HeartbeatState::AgentInitialized);
     assert!(payload.turn_id.is_none());
     assert!(status_path.is_file());

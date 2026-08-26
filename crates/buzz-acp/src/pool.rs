@@ -1877,7 +1877,7 @@ pub async fn run_prompt_task(
     // (`prompt[0].text.startsWith("/")`) fires; the wrapped Buzz context
     // follows as a second block.
     let mut slash_command: Option<String> = None;
-    let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
+    let mut prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
         let text = prepend_base_for_legacy(
@@ -1949,6 +1949,15 @@ pub async fn run_prompt_task(
         return;
     };
 
+    // WO #691: if a prior turn left a WIP checkpoint, point this turn at it.
+    if let Some(hint) = crate::wip_checkpoint::resume_wip_hint(std::path::Path::new(&ctx.cwd)) {
+        tracing::info!(
+            target: "pool::prompt",
+            "resuming from WIP checkpoint under OUTBOX/wip/"
+        );
+        prompt_sections.insert(0, hint);
+    }
+
     // 💬 — fire-and-forget so the prompt fires immediately.
     // The guard's cleanup (spawned on drop) removes 💬 after the turn completes.
     // A brief race where 💬 appears slightly after the agent starts is acceptable.
@@ -1983,6 +1992,46 @@ pub async fn run_prompt_task(
         "turn starting for {}",
         prompt_label(&source)
     );
+
+    // WO #691: sidecar WIP ticker — drops OUTBOX/wip bundles on a 5-minute
+    // cadence without borrowing `agent.acp` (keeps the original prompt select
+    // structure intact). Stopped with a final force-drop when the turn ends.
+    let cwd_path = std::path::PathBuf::from(&ctx.cwd);
+    let (wip_stop_tx, mut wip_stop_rx) = tokio::sync::oneshot::channel::<bool>();
+    let wip_cwd = cwd_path.clone();
+    let wip_ticker = tokio::spawn(async move {
+        let turn_wall_start = std::time::Instant::now();
+        let mut last_wip_drop: Option<std::time::Instant> = None;
+        let mut interval = tokio::time::interval(crate::wip_checkpoint::WIP_CHECKPOINT_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // First tick completes immediately — consume so first real drop is T+5min.
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                biased;
+                force = &mut wip_stop_rx => {
+                    let force = force.unwrap_or(true);
+                    if force {
+                        let _ = crate::wip_checkpoint::maybe_drop_wip(
+                            &wip_cwd,
+                            turn_wall_start.elapsed(),
+                            &mut last_wip_drop,
+                            true,
+                        );
+                    }
+                    break;
+                }
+                _ = interval.tick() => {
+                    let _ = crate::wip_checkpoint::maybe_drop_wip(
+                        &wip_cwd,
+                        turn_wall_start.elapsed(),
+                        &mut last_wip_drop,
+                        false,
+                    );
+                }
+            }
+        }
+    });
 
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
@@ -2024,6 +2073,9 @@ pub async fn run_prompt_task(
                     // have completed naturally just as cancel fired.
                     if agent.acp.has_in_flight_prompt() {
                         // Prompt is genuinely in-flight — cancel it.
+                        // Force a WIP drop on this termination path (WO #691).
+                        let _ = wip_stop_tx.send(true);
+                        let _ = wip_ticker.await;
                         match agent
                             .acp
                             .cancel_with_cleanup_grace(&session_id, CONTROL_CANCEL_GRACE)
@@ -2121,6 +2173,9 @@ pub async fn run_prompt_task(
                                 "control signal arrived but turn already completed — treating as success"
                             );
                         }
+                        // Natural completion — stop ticker without a force drop.
+                        let _ = wip_stop_tx.send(false);
+                        let _ = wip_ticker.await;
                         apply_completed_before_control_signal(
                             &mut agent.state,
                             &source,
@@ -2150,6 +2205,17 @@ pub async fn run_prompt_task(
             }
         }
     };
+
+    // Stop the WIP ticker: force a final drop on timeout / exit so a turn
+    // killed mid-interval loses at most five minutes of work (WO #691).
+    let force_wip_on_terminal = matches!(
+        &prompt_result,
+        Err(AcpError::IdleTimeout(_))
+            | Err(AcpError::HardTimeout { .. })
+            | Err(AcpError::AgentExited)
+    );
+    let _ = wip_stop_tx.send(force_wip_on_terminal);
+    let _ = wip_ticker.await;
 
     match prompt_result {
         Ok(stop_reason) => {

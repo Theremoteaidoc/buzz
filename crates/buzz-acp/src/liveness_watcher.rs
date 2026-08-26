@@ -380,14 +380,11 @@ pub fn discover_systemd_roster() -> std::io::Result<Vec<RosterSeat>> {
         .output()?;
 
     if !output.status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!(
-                "systemctl roster discovery failed (exit {:?}): {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr)
-            ),
-        ));
+        return Err(std::io::Error::other(format!(
+            "systemctl roster discovery failed (exit {:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -456,8 +453,8 @@ mod tests {
         assert_eq!(a.unit, "buzz-agent@codex.service");
         assert_eq!(a.unit_state, UnitState::Active);
 
-        let o = parse_unit_to_seat("buzz-orchestrator.service", UnitState::InactiveOrFailed)
-            .unwrap();
+        let o =
+            parse_unit_to_seat("buzz-orchestrator.service", UnitState::InactiveOrFailed).unwrap();
         assert_eq!(o.seat, "orchestrator");
         assert_eq!(o.unit, "buzz-orchestrator.service");
         assert_eq!(o.unit_state, UnitState::InactiveOrFailed);
@@ -482,12 +479,13 @@ buzz-orchestrator.service         loaded active running Buzz orchestrator
             .collect();
         assert_eq!(by_seat.get("codex"), Some(&UnitState::Active));
         assert_eq!(by_seat.get("hermes"), Some(&UnitState::InactiveOrFailed));
-        assert_eq!(
-            by_seat.get("firstmate"),
-            Some(&UnitState::InactiveOrFailed)
-        );
+        assert_eq!(by_seat.get("firstmate"), Some(&UnitState::InactiveOrFailed));
         assert_eq!(by_seat.get("orchestrator"), Some(&UnitState::Active));
-        assert_eq!(roster.len(), 4, "inactive/failed must not vanish: {roster:?}");
+        assert_eq!(
+            roster.len(),
+            4,
+            "inactive/failed must not vanish: {roster:?}"
+        );
     }
 
     #[test]
@@ -503,12 +501,7 @@ buzz-orchestrator.service         loaded active running Buzz orchestrator
         let dead_after = Duration::from_secs(225);
         let mtime = t0();
         let now = t0() + dead_after + Duration::from_secs(1);
-        let v = evaluate_mtime(
-            Some(mtime),
-            UnitState::InactiveOrFailed,
-            now,
-            dead_after,
-        );
+        let v = evaluate_mtime(Some(mtime), UnitState::InactiveOrFailed, now, dead_after);
         assert_eq!(v, ExternalLiveness::Dead { age_secs: 226 });
         assert!(v.is_alarm());
     }
@@ -617,7 +610,11 @@ buzz-orchestrator.service         loaded active running Buzz orchestrator
             SystemTime::now(),
             Duration::from_secs(225),
         );
-        assert_eq!(report2.seats.len(), 2, "roster must not grow from dir listing");
+        assert_eq!(
+            report2.seats.len(),
+            2,
+            "roster must not grow from dir listing"
+        );
         assert!(!report2
             .coverage
             .authoritative_seats
@@ -669,11 +666,7 @@ buzz-orchestrator.service         loaded active running Buzz orchestrator
             .expect("touch");
         assert!(status.success());
 
-        let roster = vec![seat(
-            "buzz-agent@codex.service",
-            "codex",
-            UnitState::Active,
-        )];
+        let roster = vec![seat("buzz-agent@codex.service", "codex", UnitState::Active)];
         let report = build_report(
             "seascope-ci-1",
             dir.path(),
