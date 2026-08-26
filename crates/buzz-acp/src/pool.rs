@@ -2002,8 +2002,7 @@ pub async fn run_prompt_task(
     let wip_ticker = tokio::spawn(async move {
         let turn_wall_start = std::time::Instant::now();
         let mut last_wip_drop: Option<std::time::Instant> = None;
-        let mut interval =
-            tokio::time::interval(crate::wip_checkpoint::WIP_CHECKPOINT_INTERVAL);
+        let mut interval = tokio::time::interval(crate::wip_checkpoint::WIP_CHECKPOINT_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // First tick completes immediately — consume so first real drop is T+5min.
         interval.tick().await;

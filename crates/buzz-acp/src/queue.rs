@@ -2065,7 +2065,10 @@ mod tests {
             "original event in cancelled bucket"
         );
         assert_eq!(merged.cancel_reason, Some(CancelReason::Steer));
-        assert!(merged.events[0].event.content.contains("incoming steer message"));
+        assert!(merged.events[0]
+            .event
+            .content
+            .contains("incoming steer message"));
         assert!(merged.cancelled_events[0]
             .event
             .content

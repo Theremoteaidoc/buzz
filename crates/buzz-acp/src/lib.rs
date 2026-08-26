@@ -17,9 +17,8 @@ mod wip_checkpoint;
 
 pub use agent_heartbeat::{
     classify_identity, classify_ok_turn_outcome, classify_tool_mutation, dead_after_for,
-    default_status_path,
-    HeartbeatRegistry, HeartbeatState, IdentityClass, MidTurnMutationSink, MutationKind,
-    TurnOutcomeLabel, TurnProgress, HEARTBEAT_CADENCE_DEFAULT, HEARTBEAT_CADENCE_MAX,
+    default_status_path, HeartbeatRegistry, HeartbeatState, IdentityClass, MidTurnMutationSink,
+    MutationKind, TurnOutcomeLabel, TurnProgress, HEARTBEAT_CADENCE_DEFAULT, HEARTBEAT_CADENCE_MAX,
     HEARTBEAT_CADENCE_MIN, STALL_AFTER_DEFAULT,
 };
 pub use liveness_watcher::{
@@ -1660,9 +1659,7 @@ async fn tokio_main() -> Result<()> {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| config.session_title.clone())
-        .unwrap_or_else(|| {
-            crate::config::normalize_agent_command_identity(&config.agent_command)
-        });
+        .unwrap_or_else(|| crate::config::normalize_agent_command_identity(&config.agent_command));
     let mut agent_hb = HeartbeatRegistry::new(STALL_AFTER_DEFAULT, HEARTBEAT_CADENCE_DEFAULT);
     if let Ok(path) = std::env::var("BUZZ_ACP_HEARTBEAT_STATUS_PATH") {
         if !path.trim().is_empty() {
@@ -1676,8 +1673,11 @@ async fn tokio_main() -> Result<()> {
         agent_hb.set_status_path(default_status_path(&agent_label));
     }
     let has_agent_service = std::env::var_os("BUZZ_AGENT_SERVICE").is_some()
-        || std::path::Path::new(&format!("/etc/systemd/system/buzz-agent@{}.service", agent_label))
-            .exists();
+        || std::path::Path::new(&format!(
+            "/etc/systemd/system/buzz-agent@{}.service",
+            agent_label
+        ))
+        .exists();
     let boot_at = std::time::SystemTime::now();
     agent_hb.register_identity(
         &agent_label,
@@ -1908,7 +1908,14 @@ async fn tokio_main() -> Result<()> {
             // called on relay events or pool results, neither of which
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, Some(&mut agent_hb), &agent_label) {
+                for (channel_id, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    Some(&mut agent_hb),
+                    &agent_label,
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -1944,7 +1951,14 @@ async fn tokio_main() -> Result<()> {
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
-            for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, Some(&mut agent_hb), &agent_label) {
+            for (channel_id, thread_tags) in dispatch_pending(
+                &mut pool,
+                &mut queue,
+                &ctx,
+                &mut last_activity,
+                Some(&mut agent_hb),
+                &agent_label,
+            ) {
                 typing_channels.insert(channel_id, thread_tags);
             }
         }
@@ -2581,7 +2595,14 @@ async fn tokio_main() -> Result<()> {
                 {
                     break;
                 }
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, Some(&mut agent_hb), &agent_label) {
+                for (channel_id, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    Some(&mut agent_hb),
+                    &agent_label,
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2604,7 +2625,14 @@ async fn tokio_main() -> Result<()> {
                     tracing::error!("all agents dead — exiting");
                     break;
                 }
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, Some(&mut agent_hb), &agent_label) {
+                for (channel_id, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    Some(&mut agent_hb),
+                    &agent_label,
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2734,7 +2762,14 @@ async fn tokio_main() -> Result<()> {
                 // tear down the in-flight task; on its completion the
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, Some(&mut agent_hb), &agent_label) {
+                for (channel_id, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &mut last_activity,
+                    Some(&mut agent_hb),
+                    &agent_label,
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2760,7 +2795,14 @@ async fn tokio_main() -> Result<()> {
                             "ready",
                             None,
                         );
-                        for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity, Some(&mut agent_hb), &agent_label) {
+                        for (channel_id, thread_tags) in dispatch_pending(
+                            &mut pool,
+                            &mut queue,
+                            &ctx,
+                            &mut last_activity,
+                            Some(&mut agent_hb),
+                            &agent_label,
+                        ) {
                             typing_channels.insert(channel_id, thread_tags);
                         }
                     }
@@ -3483,9 +3525,9 @@ fn handle_prompt_result(
             PromptOutcome::CancelDrainTimeout(_) => "cancel_drain_timeout",
             // Exhaustiveness: split_empty_outcome covers Timeout/AgentExited/Error
             // and Ok-empty; remaining Ok-with-output / cancel arms above.
-            PromptOutcome::Error(_)
-            | PromptOutcome::Timeout(_)
-            | PromptOutcome::AgentExited => unreachable!("split_empty_outcome covers this arm"),
+            PromptOutcome::Error(_) | PromptOutcome::Timeout(_) | PromptOutcome::AgentExited => {
+                unreachable!("split_empty_outcome covers this arm")
+            }
         },
     };
     let agent_index = result.agent.index;
@@ -3554,23 +3596,12 @@ fn handle_prompt_result(
                     );
                 }
                 if result.produced_message {
-                    hb.record_mutation(
-                        agent_label,
-                        MutationKind::Message,
-                        "turn_message",
-                        now,
-                    );
+                    hb.record_mutation(agent_label, MutationKind::Message, "turn_message", now);
                 }
                 if result.produced_file {
                     hb.record_mutation(agent_label, MutationKind::File, "turn_file", now);
                 }
-                let _ = hb.set_state(
-                    agent_label,
-                    state,
-                    phase,
-                    Some(turn_id.clone()),
-                    now,
-                );
+                let _ = hb.set_state(agent_label, state, phase, Some(turn_id.clone()), now);
             }
             pool.return_agent(result.agent);
         }
@@ -7024,9 +7055,7 @@ mod cancel_merge_fallback_notice_tests {
     #[test]
     fn cancel_merge_fallback_posts_exactly_one_channel_notice_per_fallback_event() {
         assert_eq!(
-            notice_count(pool::SteerAck::Err(
-                pool::SteerError::ExpectedRunIdMissing
-            )),
+            notice_count(pool::SteerAck::Err(pool::SteerError::ExpectedRunIdMissing)),
             1,
             "ExpectedRunIdMissing (adapter without _session/steering) must post once"
         );
@@ -7070,9 +7099,7 @@ mod cancel_merge_fallback_notice_tests {
     #[test]
     fn cancel_merge_fallback_notice_names_seat_and_incoming_cancel() {
         let notices = channel_notices_for_steer_ack(
-            &Ok(pool::SteerAck::Err(
-                pool::SteerError::ExpectedRunIdMissing
-            )),
+            &Ok(pool::SteerAck::Err(pool::SteerError::ExpectedRunIdMissing)),
             "Cursor",
         );
         assert_eq!(notices.len(), 1);
