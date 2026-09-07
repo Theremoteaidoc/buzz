@@ -205,9 +205,7 @@ impl IdleKillTracker {
 
 /// One-line channel notice when WIP resume is force-skipped (WO #1093 AC2).
 pub fn wip_idle_skip_notice(consecutive: u32) -> String {
-    format!(
-        "resuming from queue, WIP resume skipped after {consecutive} consecutive idle-kills"
-    )
+    format!("resuming from queue, WIP resume skipped after {consecutive} consecutive idle-kills")
 }
 
 /// True when `path` is a bare placeholder checkpoint (WO #1093 AC1).
@@ -257,9 +255,7 @@ pub fn is_header_only_checkpoint_body(body: &str) -> bool {
 /// Returns the destination path on success.
 pub fn archive_wip_bundle(work_dir: &Path, bundle: &Path) -> Option<PathBuf> {
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-    let dest_dir = work_dir
-        .join("OUTBOX")
-        .join(format!("wip-archive-{stamp}"));
+    let dest_dir = work_dir.join("OUTBOX").join(format!("wip-archive-{stamp}"));
     fs::create_dir_all(&dest_dir).ok()?;
     let name = bundle.file_name()?;
     let dest = dest_dir.join(name);

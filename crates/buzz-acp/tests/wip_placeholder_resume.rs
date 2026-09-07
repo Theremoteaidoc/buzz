@@ -70,11 +70,7 @@ fn two_consecutive_killed_idle_skips_once_with_one_notice() {
     let wip = dir.join("OUTBOX").join("wip");
     fs::create_dir_all(&wip).unwrap();
     let bundle = wip.join("real.bundle");
-    fs::write(
-        &bundle,
-        vec![b'R'; PLACEHOLDER_MAX_BYTES as usize + 8],
-    )
-    .unwrap();
+    fs::write(&bundle, vec![b'R'; PLACEHOLDER_MAX_BYTES as usize + 8]).unwrap();
 
     let channel = Uuid::from_u128(0xdead_beef_cafe_u128);
     let mut tracker = IdleKillTracker::new();
