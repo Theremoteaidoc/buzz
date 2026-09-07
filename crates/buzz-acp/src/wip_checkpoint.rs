@@ -1,12 +1,19 @@
-//! Turn WIP checkpointing (WO #691 / SPEC-08).
+//! Turn WIP checkpointing (WO #691 / SPEC-08 / WO #1093).
 //!
 //! Drops a work-in-progress bundle under `OUTBOX/wip/` every five minutes
 //! (and on termination), splits formerly-collapsed empty turn outcomes into
 //! four distinct labels, and selects the newest WIP bundle for resume.
+//!
+//! WO #1093: placeholder checkpoints (bare `# buzz-acp wip checkpoint` markers)
+//! are archived instead of resumed, and two consecutive `killed_idle` outcomes
+//! for the same seat/channel force-skip WIP resume with a one-line channel notice.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use uuid::Uuid;
 
 use crate::pool::{PromptOutcome, TimeoutKind};
 
@@ -20,6 +27,17 @@ pub const WIP_OUTBOX_REL: &str = "OUTBOX/wip";
 
 /// Branch-watcher request trigger suffix (SSOT: scripts/ops/factory-ci1/branch-watcher).
 pub const BRANCH_WATCHER_REQUEST_SUFFIX: &str = "OUTBOX/branch/request.go";
+
+/// Marker header written by [`write_wip_bundle`] when a real `git bundle` is unavailable.
+pub const WIP_CHECKPOINT_HEADER: &str = "# buzz-acp wip checkpoint";
+
+/// Size floor for a resumable checkpoint (WO #1093 AC1). Bundles strictly under
+/// this many bytes are treated as placeholders and archived, never resumed.
+pub const PLACEHOLDER_MAX_BYTES: u64 = 1024;
+
+/// Consecutive `killed_idle` outcomes before the next turn force-skips WIP resume
+/// (WO #1093 AC2).
+pub const IDLE_KILL_SKIP_THRESHOLD: u32 = 2;
 
 /// Refined empty-turn cause. Replaces the collapsed `returned_empty` label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,18 +140,183 @@ pub fn latest_wip_bundle(wip_dir: &Path) -> Option<PathBuf> {
     best.map(|(p, _)| p)
 }
 
+/// Decision for the next turn's WIP-resume path (WO #1093).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WipResumeDecision {
+    /// Insert this hint at the front of prompt sections.
+    Resume(String),
+    /// Skip resume; caller must post `notice` exactly once to the channel.
+    SkipAfterIdleKills { notice: String },
+    /// No WIP to resume and no skip notice.
+    None,
+}
+
+/// Per-seat/channel consecutive `killed_idle` streak (WO #1093 AC2).
+///
+/// Survives agent respawn when held outside the agent process (e.g. shared via
+/// [`crate::pool::PromptContext`]).
+#[derive(Debug, Default, Clone)]
+pub struct IdleKillTracker {
+    /// `(agent_index, channel_id)` → consecutive killed_idle count.
+    streaks: HashMap<(usize, Uuid), u32>,
+}
+
+impl IdleKillTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a turn outcome for `(agent, channel)`. Returns the new streak.
+    ///
+    /// Non-`killed_idle` outcomes clear the streak for that pairing.
+    pub fn record(&mut self, agent_index: usize, channel: Uuid, killed_idle: bool) -> u32 {
+        let key = (agent_index, channel);
+        if killed_idle {
+            let entry = self.streaks.entry(key).or_insert(0);
+            *entry = entry.saturating_add(1);
+            *entry
+        } else {
+            self.streaks.remove(&key);
+            0
+        }
+    }
+
+    /// If the pairing has reached [`IDLE_KILL_SKIP_THRESHOLD`], clear it and
+    /// return the streak so the caller can post exactly one skip notice.
+    pub fn take_skip(&mut self, agent_index: usize, channel: Uuid) -> Option<u32> {
+        let key = (agent_index, channel);
+        match self.streaks.get(&key).copied() {
+            Some(n) if n >= IDLE_KILL_SKIP_THRESHOLD => {
+                self.streaks.remove(&key);
+                Some(n)
+            }
+            _ => None,
+        }
+    }
+
+    /// Current streak for tests / diagnostics.
+    pub fn streak(&self, agent_index: usize, channel: Uuid) -> u32 {
+        self.streaks
+            .get(&(agent_index, channel))
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// One-line channel notice when WIP resume is force-skipped (WO #1093 AC2).
+pub fn wip_idle_skip_notice(consecutive: u32) -> String {
+    format!("resuming from queue, WIP resume skipped after {consecutive} consecutive idle-kills")
+}
+
+/// True when `path` is a bare placeholder checkpoint (WO #1093 AC1).
+///
+/// A checkpoint is a placeholder when either:
+/// - its size is strictly under [`PLACEHOLDER_MAX_BYTES`], or
+/// - its body is only the [`WIP_CHECKPOINT_HEADER`] line plus `ts=<digits>` lines.
+pub fn is_placeholder_checkpoint(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        // Unreadable → treat as unusable (do not resume).
+        return true;
+    };
+    if meta.len() < PLACEHOLDER_MAX_BYTES {
+        return true;
+    }
+    match fs::read_to_string(path) {
+        Ok(body) => is_header_only_checkpoint_body(&body),
+        Err(_) => false,
+    }
+}
+
+/// True when `body` is only the checkpoint header plus `ts=` lines (no WIP payload).
+pub fn is_header_only_checkpoint_body(body: &str) -> bool {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let mut lines = trimmed.lines().filter(|l| !l.trim().is_empty());
+    match lines.next() {
+        Some(first) if first.trim() == WIP_CHECKPOINT_HEADER => {}
+        _ => return false,
+    }
+    for line in lines {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("ts=") else {
+            return false;
+        };
+        if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Move `bundle` into `work_dir/OUTBOX/wip-archive-<UTC>/` (Ox incident shape).
+///
+/// Returns the destination path on success.
+pub fn archive_wip_bundle(work_dir: &Path, bundle: &Path) -> Option<PathBuf> {
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let dest_dir = work_dir.join("OUTBOX").join(format!("wip-archive-{stamp}"));
+    fs::create_dir_all(&dest_dir).ok()?;
+    let name = bundle.file_name()?;
+    let dest = dest_dir.join(name);
+    match fs::rename(bundle, &dest) {
+        Ok(()) => Some(dest),
+        Err(_) => {
+            // Cross-device fallback.
+            fs::copy(bundle, &dest).ok()?;
+            fs::remove_file(bundle).ok()?;
+            Some(dest)
+        }
+    }
+}
+
 /// Build the prompt hint that points a resumed turn at the newest WIP bundle.
 ///
-/// Returns `None` when `work_dir/OUTBOX/wip/` has no bundles. Used by the
-/// prompt-task resume path in `pool.rs` (WO #691 slice 4).
+/// Returns `None` when `work_dir/OUTBOX/wip/` has no resumable bundles. Placeholder
+/// checkpoints are archived (WO #1093 AC1) and never surface as a resume hint.
+/// Used by the prompt-task resume path in `pool.rs` (WO #691 slice 4).
 pub fn resume_wip_hint(work_dir: &Path) -> Option<String> {
-    let bundle = latest_wip_bundle(&wip_dir(work_dir))?;
-    Some(format!(
-        "[WIP Resume]\nA prior turn left a checkpoint at `{}`. Resume from that \
-         work-in-progress bundle — at most five minutes of progress may be missing. \
-         Do not announce the resume.",
-        bundle.display()
-    ))
+    let dir = wip_dir(work_dir);
+    loop {
+        let bundle = latest_wip_bundle(&dir)?;
+        if is_placeholder_checkpoint(&bundle) {
+            if archive_wip_bundle(work_dir, &bundle).is_none() {
+                // Archive failed — delete so we cannot loop forever on a stuck file.
+                let _ = fs::remove_file(&bundle);
+            }
+            continue;
+        }
+        return Some(format!(
+            "[WIP Resume]\nA prior turn left a checkpoint at `{}`. Resume from that \
+             work-in-progress bundle — at most five minutes of progress may be missing. \
+             Do not announce the resume.",
+            bundle.display()
+        ));
+    }
+}
+
+/// Plan WIP resume for the next turn (WO #1093).
+///
+/// When `channel` is set and the idle-kill streak has reached the skip threshold,
+/// returns [`WipResumeDecision::SkipAfterIdleKills`] and clears the streak.
+/// Otherwise archives placeholders and optionally returns a resume hint.
+pub fn decide_wip_resume(
+    work_dir: &Path,
+    tracker: &mut IdleKillTracker,
+    agent_index: usize,
+    channel: Option<Uuid>,
+) -> WipResumeDecision {
+    if let Some(ch) = channel {
+        if let Some(n) = tracker.take_skip(agent_index, ch) {
+            return WipResumeDecision::SkipAfterIdleKills {
+                notice: wip_idle_skip_notice(n),
+            };
+        }
+    }
+    match resume_wip_hint(work_dir) {
+        Some(hint) => WipResumeDecision::Resume(hint),
+        None => WipResumeDecision::None,
+    }
 }
 
 /// True when `rel` is the branch-watcher trigger path (not a WIP bundle path).
@@ -184,7 +367,7 @@ fn write_wip_bundle(work_dir: &Path) -> Option<PathBuf> {
         let _ = fs::remove_file(&path);
     }
 
-    let body = format!("# buzz-acp wip checkpoint\nts={ts}\n");
+    let body = format!("{WIP_CHECKPOINT_HEADER}\nts={ts}\n");
     fs::write(&path, body).ok()?;
     Some(path)
 }
@@ -362,20 +545,21 @@ mod tests {
 
     /// Acceptance: a turn killed at minute 25 has a bundle no older than 5
     /// minutes, and the resume hint references that bundle.
+    ///
+    /// Uses a >1 KB payload so WO #1093 placeholder detection does not archive it.
     #[test]
     fn test_kill_at_25_minutes_resumes_from_bundle_within_5_minutes() {
         let dir = tempfile_dir("kill-at-25");
-        let mut last = None;
-        // Cadence drop at T+20min (simulated via force after a prior cadence
-        // drop's Instant would require real sleep; force two drops and assert
-        // the newest is what resume sees).
-        let drop_at_20 = maybe_drop_wip(&dir, Duration::from_secs(20 * 60), &mut last, true)
-            .expect("drop at 20");
+        let wip = dir.join("OUTBOX").join("wip");
+        fs::create_dir_all(&wip).unwrap();
+        let drop_at_20 = wip.join("drop-at-20.bundle");
+        let kill_at_25 = wip.join("kill-at-25.bundle");
+        // Real-sized payloads (not placeholder markers).
+        let payload = vec![b'x'; PLACEHOLDER_MAX_BYTES as usize + 64];
+        fs::write(&drop_at_20, &payload).unwrap();
         thread::sleep(StdDuration::from_millis(20));
-        let kill_at_25 = maybe_drop_wip(&dir, Duration::from_secs(25 * 60), &mut last, true)
-            .expect("force drop at kill");
-        assert_ne!(drop_at_20, kill_at_25);
-        let latest = latest_wip_bundle(&dir.join("OUTBOX").join("wip")).unwrap();
+        fs::write(&kill_at_25, &payload).unwrap();
+        let latest = latest_wip_bundle(&wip).unwrap();
         assert_eq!(latest, kill_at_25);
         let hint = resume_wip_hint(&dir).expect("resume hint");
         assert!(
@@ -395,6 +579,124 @@ mod tests {
             "bundle age {:?} must be < 5 minutes",
             age
         );
+    }
+
+    /// WO #1093 AC1/AC3: Ox-shaped 40-byte placeholder is archived, never resumed.
+    #[test]
+    fn test_placeholder_fixture_is_archived_not_resumed() {
+        let dir = tempfile_dir("placeholder-ox");
+        let wip = dir.join("OUTBOX").join("wip");
+        fs::create_dir_all(&wip).unwrap();
+        let bundle = wip.join("1788281363-666978601.bundle");
+        // Byte-for-byte Ox incident shape (40 bytes).
+        let body = format!("{WIP_CHECKPOINT_HEADER}\nts=1788281363\n");
+        assert_eq!(body.len(), 40, "fixture must match Ox 40-byte shape");
+        fs::write(&bundle, &body).unwrap();
+        assert!(is_placeholder_checkpoint(&bundle));
+        assert!(
+            resume_wip_hint(&dir).is_none(),
+            "placeholder must not surface as [WIP Resume]"
+        );
+        assert!(!bundle.exists(), "placeholder must leave OUTBOX/wip/");
+        let archives: Vec<_> = fs::read_dir(dir.join("OUTBOX"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("wip-archive-"))
+            })
+            .collect();
+        assert_eq!(archives.len(), 1, "exactly one archive dir");
+        let archived = archives[0].join("1788281363-666978601.bundle");
+        assert!(archived.exists());
+        assert_eq!(fs::read_to_string(&archived).unwrap(), body);
+    }
+
+    #[test]
+    fn test_header_only_body_is_placeholder_even_when_padded_past_1kb() {
+        let mut body = format!("{WIP_CHECKPOINT_HEADER}\nts=42\n");
+        while body.len() < PLACEHOLDER_MAX_BYTES as usize + 8 {
+            body.push('\n');
+        }
+        assert!(is_header_only_checkpoint_body(&body));
+        let dir = tempfile_dir("padded-header");
+        let wip = dir.join("OUTBOX").join("wip");
+        fs::create_dir_all(&wip).unwrap();
+        let bundle = wip.join("padded.bundle");
+        fs::write(&bundle, &body).unwrap();
+        assert!(is_placeholder_checkpoint(&bundle));
+        assert!(resume_wip_hint(&dir).is_none());
+    }
+
+    #[test]
+    fn test_real_sized_bundle_still_resumes() {
+        let dir = tempfile_dir("real-bundle");
+        let wip = dir.join("OUTBOX").join("wip");
+        fs::create_dir_all(&wip).unwrap();
+        let bundle = wip.join("real.bundle");
+        let mut payload = b"PACK\nreal git-ish payload\n".to_vec();
+        payload.resize(PLACEHOLDER_MAX_BYTES as usize + 32, b'y');
+        fs::write(&bundle, &payload).unwrap();
+        assert!(!is_placeholder_checkpoint(&bundle));
+        let hint = resume_wip_hint(&dir).expect("real bundle resumes");
+        assert!(hint.contains("real.bundle"));
+        assert!(bundle.exists(), "real bundle must stay in place");
+    }
+
+    /// WO #1093 AC2: after 2 consecutive killed_idle, next decide skips + one notice.
+    #[test]
+    fn test_two_consecutive_killed_idle_force_skips_wip_resume_once() {
+        let dir = tempfile_dir("idle-skip");
+        let wip = dir.join("OUTBOX").join("wip");
+        fs::create_dir_all(&wip).unwrap();
+        // Leave a real-sized bundle so skip is not confusable with AC1 archive.
+        let bundle = wip.join("real.bundle");
+        let payload = vec![b'z'; PLACEHOLDER_MAX_BYTES as usize + 16];
+        fs::write(&bundle, &payload).unwrap();
+
+        let channel = Uuid::from_u128(0x_c678_ae42_6b3f_4e3f_9649_5fd3_288f_33bb);
+        let agent = 0usize;
+        let mut tracker = IdleKillTracker::new();
+
+        assert_eq!(tracker.record(agent, channel, true), 1);
+        // Streak 1: still resume.
+        match decide_wip_resume(&dir, &mut tracker, agent, Some(channel)) {
+            WipResumeDecision::Resume(hint) => assert!(hint.contains("real.bundle")),
+            other => panic!("expected Resume at streak=1, got {other:?}"),
+        }
+        assert_eq!(tracker.streak(agent, channel), 1);
+
+        assert_eq!(tracker.record(agent, channel, true), 2);
+        let mut notices = 0u32;
+        match decide_wip_resume(&dir, &mut tracker, agent, Some(channel)) {
+            WipResumeDecision::SkipAfterIdleKills { notice } => {
+                notices += 1;
+                assert_eq!(notice, wip_idle_skip_notice(2));
+            }
+            other => panic!("expected SkipAfterIdleKills at streak=2, got {other:?}"),
+        }
+        assert_eq!(notices, 1);
+        assert_eq!(tracker.streak(agent, channel), 0);
+
+        // Counter reset → resume again; no second notice.
+        match decide_wip_resume(&dir, &mut tracker, agent, Some(channel)) {
+            WipResumeDecision::Resume(_) => {}
+            other => panic!("expected Resume after reset, got {other:?}"),
+        }
+        assert!(tracker.take_skip(agent, channel).is_none());
+        assert!(bundle.exists(), "AC2 skip must not delete a real bundle");
+    }
+
+    #[test]
+    fn test_non_idle_outcome_clears_streak() {
+        let channel = Uuid::from_u128(1);
+        let mut tracker = IdleKillTracker::new();
+        assert_eq!(tracker.record(0, channel, true), 1);
+        assert_eq!(tracker.record(0, channel, false), 0);
+        assert_eq!(tracker.streak(0, channel), 0);
+        assert!(tracker.take_skip(0, channel).is_none());
     }
 
     fn tempfile_dir(label: &str) -> PathBuf {
