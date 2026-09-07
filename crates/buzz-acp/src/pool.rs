@@ -571,6 +571,9 @@ pub struct PromptContext {
     /// Mid-turn durable-write sink for the heartbeat registry (WO #133 B1).
     /// Installed on the AcpClient at turn start; drained by the main ticker.
     pub mutation_sink: Option<crate::agent_heartbeat::MidTurnMutationSink>,
+    /// Consecutive `killed_idle` streaks per seat/channel (WO #1093). Shared
+    /// across turns so a respawn does not forget the wedge counter.
+    pub idle_kill_tracker: std::sync::Arc<std::sync::Mutex<crate::wip_checkpoint::IdleKillTracker>>,
 }
 
 impl AgentPool {
@@ -1949,13 +1952,55 @@ pub async fn run_prompt_task(
         return;
     };
 
-    // WO #691: if a prior turn left a WIP checkpoint, point this turn at it.
-    if let Some(hint) = crate::wip_checkpoint::resume_wip_hint(std::path::Path::new(&ctx.cwd)) {
-        tracing::info!(
-            target: "pool::prompt",
-            "resuming from WIP checkpoint under OUTBOX/wip/"
-        );
-        prompt_sections.insert(0, hint);
+    // WO #691 / #1093: WIP resume — archive placeholders; force-skip after
+    // consecutive killed_idle; otherwise point this turn at the newest bundle.
+    {
+        use crate::wip_checkpoint::{decide_wip_resume, WipResumeDecision};
+        let channel = match &source {
+            PromptSource::Channel(ch) => Some(*ch),
+            PromptSource::Heartbeat => None,
+        };
+        let decision = {
+            let mut tracker = ctx
+                .idle_kill_tracker
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            decide_wip_resume(
+                std::path::Path::new(&ctx.cwd),
+                &mut tracker,
+                agent.index,
+                channel,
+            )
+        };
+        match decision {
+            WipResumeDecision::Resume(hint) => {
+                tracing::info!(
+                    target: "pool::prompt",
+                    "resuming from WIP checkpoint under OUTBOX/wip/"
+                );
+                prompt_sections.insert(0, hint);
+            }
+            WipResumeDecision::SkipAfterIdleKills { notice } => {
+                tracing::warn!(
+                    target: "pool::prompt",
+                    agent = agent.index,
+                    channel = ?channel,
+                    "{notice}"
+                );
+                if let Some(ch) = channel {
+                    let rest = ctx.rest_client.clone();
+                    let thread_tags = batch
+                        .as_ref()
+                        .and_then(|b| b.events.last())
+                        .map(|be| crate::queue::parse_thread_tags(&be.event))
+                        .unwrap_or_default();
+                    tokio::spawn(async move {
+                        post_failure_notice(&rest, ch, &thread_tags, &notice).await;
+                    });
+                }
+            }
+            WipResumeDecision::None => {}
+        }
     }
 
     // 💬 — fire-and-forget so the prompt fires immediately.
@@ -6625,6 +6670,9 @@ mod tests {
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
             mutation_sink: None,
+            idle_kill_tracker: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::wip_checkpoint::IdleKillTracker::new(),
+            )),
         }
     }
 

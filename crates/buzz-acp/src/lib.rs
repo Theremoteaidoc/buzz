@@ -28,9 +28,11 @@ pub use liveness_watcher::{
 };
 pub use usage::TurnUsage;
 pub use wip_checkpoint::{
-    is_branch_watcher_request, latest_wip_bundle, maybe_drop_wip, resume_wip_hint,
-    split_empty_outcome, EmptyOutcomeKind, BRANCH_WATCHER_REQUEST_SUFFIX, WIP_CHECKPOINT_INTERVAL,
-    WIP_OUTBOX_REL,
+    archive_wip_bundle, decide_wip_resume, is_branch_watcher_request,
+    is_header_only_checkpoint_body, is_placeholder_checkpoint, latest_wip_bundle, maybe_drop_wip,
+    resume_wip_hint, split_empty_outcome, wip_idle_skip_notice, EmptyOutcomeKind, IdleKillTracker,
+    WipResumeDecision, BRANCH_WATCHER_REQUEST_SUFFIX, IDLE_KILL_SKIP_THRESHOLD,
+    PLACEHOLDER_MAX_BYTES, WIP_CHECKPOINT_HEADER, WIP_CHECKPOINT_INTERVAL, WIP_OUTBOX_REL,
 };
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1634,6 +1636,9 @@ async fn tokio_main() -> Result<()> {
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
         mutation_sink: Some(mutation_sink.clone()),
+        idle_kill_tracker: std::sync::Arc::new(std::sync::Mutex::new(
+            wip_checkpoint::IdleKillTracker::new(),
+        )),
     });
 
     if !config.memory_enabled {
@@ -2576,6 +2581,7 @@ async fn tokio_main() -> Result<()> {
                     Some(&ctx.rest_client),
                     Some(&mut agent_hb),
                     &agent_label,
+                    &ctx.idle_kill_tracker,
                 ) == LoopAction::Exit
                 {
                     break;
@@ -3377,6 +3383,7 @@ fn handle_prompt_result(
     rest_client: Option<&relay::RestClient>,
     mut agent_heartbeat: Option<&mut HeartbeatRegistry>,
     agent_label: &str,
+    idle_kill_tracker: &std::sync::Arc<std::sync::Mutex<wip_checkpoint::IdleKillTracker>>,
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
@@ -3530,7 +3537,14 @@ fn handle_prompt_result(
             }
         },
     };
-    let agent_index = result.agent.index;
+    // WO #1093: track consecutive killed_idle per seat/channel for WIP-resume skip.
+    if let PromptSource::Channel(ch) = &result.source {
+        let killed_idle = outcome_label == "killed_idle";
+        let mut tracker = idle_kill_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        tracker.record(agent_index, *ch, killed_idle);
+    }
     // Capture the spawn-time configured model and our PID before the agent is
     // moved into match arms below. `desired_model` reflects the config/persona
     // model at spawn time — it does NOT reflect `session/set_model` overrides,
@@ -5735,6 +5749,9 @@ mod error_outcome_emission_tests {
             None,
             None,
             "test-agent",
+            &std::sync::Arc::new(std::sync::Mutex::new(
+                crate::wip_checkpoint::IdleKillTracker::new(),
+            )),
         );
 
         let turn_errors: Vec<_> = observer
@@ -5906,6 +5923,9 @@ mod error_outcome_emission_tests {
                 None,
                 None,
                 "test-agent",
+            &std::sync::Arc::new(std::sync::Mutex::new(
+                crate::wip_checkpoint::IdleKillTracker::new(),
+            )),
             );
             let events = observer.snapshot();
             let turn_error = events.iter().find(|e| e.kind == "turn_error").unwrap();
@@ -5983,6 +6003,9 @@ mod error_outcome_emission_tests {
                 None,
                 None,
                 "test-agent",
+            &std::sync::Arc::new(std::sync::Mutex::new(
+                crate::wip_checkpoint::IdleKillTracker::new(),
+            )),
             );
             let events = observer.snapshot();
             let turn_error = events.iter().find(|e| e.kind == "turn_error").unwrap();
@@ -6071,6 +6094,9 @@ mod error_outcome_emission_tests {
                 None,
                 None,
                 "test-agent",
+            &std::sync::Arc::new(std::sync::Mutex::new(
+                crate::wip_checkpoint::IdleKillTracker::new(),
+            )),
             );
             (
                 queue.pending_channels(),
@@ -6180,6 +6206,9 @@ mod error_outcome_emission_tests {
                 None,
                 None,
                 "test-agent",
+            &std::sync::Arc::new(std::sync::Mutex::new(
+                crate::wip_checkpoint::IdleKillTracker::new(),
+            )),
             );
             (
                 queue.pending_channels(),
@@ -6275,6 +6304,9 @@ mod error_outcome_emission_tests {
             None,
             None,
             "test-agent",
+        &std::sync::Arc::new(std::sync::Mutex::new(
+            crate::wip_checkpoint::IdleKillTracker::new(),
+        )),
         );
 
         let events = observer.snapshot();
@@ -6372,6 +6404,9 @@ mod error_outcome_emission_tests {
             None,
             None,
             "test-agent",
+        &std::sync::Arc::new(std::sync::Mutex::new(
+            crate::wip_checkpoint::IdleKillTracker::new(),
+        )),
         );
 
         let events = observer.snapshot();
@@ -6491,6 +6526,9 @@ mod error_outcome_emission_tests {
             None,
             None,
             "test-agent",
+        &std::sync::Arc::new(std::sync::Mutex::new(
+            crate::wip_checkpoint::IdleKillTracker::new(),
+        )),
         );
 
         // Batch preserved as a cancelled merge, not dead-lettered — same
@@ -6648,6 +6686,9 @@ mod error_outcome_emission_tests {
             None,
             None,
             "test-agent",
+        &std::sync::Arc::new(std::sync::Mutex::new(
+            crate::wip_checkpoint::IdleKillTracker::new(),
+        )),
         );
 
         let requeued = queue.flush_next().expect("cancelled batch must re-flush");
@@ -6746,6 +6787,9 @@ mod error_outcome_emission_tests {
             None,
             None,
             "test-agent",
+        &std::sync::Arc::new(std::sync::Mutex::new(
+            crate::wip_checkpoint::IdleKillTracker::new(),
+        )),
         );
 
         // No batch to merge — the queue has nothing pending for any channel.
@@ -6932,6 +6976,9 @@ mod error_outcome_emission_tests {
             None,
             None,
             "test-agent",
+        &std::sync::Arc::new(std::sync::Mutex::new(
+            crate::wip_checkpoint::IdleKillTracker::new(),
+        )),
         );
 
         // The batch must not be requeued: pending_channels returns 0.
@@ -7021,6 +7068,9 @@ mod error_outcome_emission_tests {
             None,
             None,
             "test-agent",
+        &std::sync::Arc::new(std::sync::Mutex::new(
+            crate::wip_checkpoint::IdleKillTracker::new(),
+        )),
         );
 
         // Non-auth application error: batch IS requeued (first attempt, retry budget > 0).
