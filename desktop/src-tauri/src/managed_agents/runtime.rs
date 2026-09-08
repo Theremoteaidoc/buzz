@@ -747,16 +747,13 @@ pub fn spawn_agent_child(
     let effective_model = effective_cfg.model.value;
     let effective_provider = effective_cfg.provider.value;
 
-    if let Some(prompt) = &effective_prompt {
-        command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
-    } else {
-        command.env_remove("BUZZ_ACP_SYSTEM_PROMPT");
-    }
-    if let Some(model) = effective_model.as_deref() {
-        command.env("BUZZ_ACP_MODEL", model);
-    } else {
-        command.env_remove("BUZZ_ACP_MODEL");
-    }
+    super::apply_acp_prompt_and_model_env(
+        &mut command,
+        effective_prompt.as_deref(),
+        effective_model.as_deref(),
+        #[cfg(feature = "mesh-llm")]
+        mesh_model_id.as_deref(),
+    );
     // Session title for the harness to pass out-of-band on `session/new`. The
     // adapter names the session after it; it never reaches the prompt, so this
     // is display metadata only. The spawn-config snapshot records the same

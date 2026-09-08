@@ -1,9 +1,95 @@
 pub const RELAY_MESH_API_BASE_URL: &str = "http://127.0.0.1:9337/v1";
 pub const RELAY_MESH_API_KEY_PLACEHOLDER: &str = "buzz-mesh-local";
 pub const RELAY_MESH_PROVIDER_ID: &str = "relay-mesh";
+/// Stored value for "let the mesh decide", kept as the user-facing word.
 pub const RELAY_MESH_AUTO_MODEL_ID: &str = "auto";
+/// MeshLLM's virtual model. It resolves per request: a Mixture-of-Agents
+/// committee when two or more workers are reachable, and otherwise degrades to
+/// a single served model rather than erroring
+/// (`moa_gateway::degrade_to_single_model`). That degradation is a pre-flight
+/// capacity decision, so a committee that forms and *then* loses a worker still
+/// surfaces as a failed turn — MoA repairs partial results internally
+/// (`repair_tool_result_answer`) before it gets that far. Buzz translates the
+/// stored `auto` here rather than teaching buzz-agent anything about meshes.
 #[cfg(feature = "mesh-llm")]
-pub const RELAY_MESH_PREFER_MESH_FOR_AUTO_ENV: &str = "BUZZ_AGENT_PREFER_MESH_FOR_AUTO";
+pub const RELAY_MESH_VIRTUAL_MODEL_ID: &str = "mesh";
+
+/// The wire name for a stored shared-compute model: `auto` (and a blank legacy
+/// value) means "let the mesh decide" and becomes MeshLLM's virtual `mesh`
+/// model; anything else is a model the user named and is passed through.
+///
+/// The single place this mapping happens. Every consumer that has to name a
+/// model to the mesh — the LLM transport env and the ACP harness — goes through
+/// here, so they cannot disagree.
+#[cfg(feature = "mesh-llm")]
+pub fn relay_mesh_wire_model(stored: &str) -> &str {
+    match stored.trim() {
+        "" | RELAY_MESH_AUTO_MODEL_ID => RELAY_MESH_VIRTUAL_MODEL_ID,
+        named => named,
+    }
+}
+
+/// Keep the harness model aligned with the LLM transport's wire model.
+/// With no effective model, remove any stale inherited override.
+pub fn apply_acp_prompt_and_model_env(
+    command: &mut std::process::Command,
+    prompt: Option<&str>,
+    effective_model: Option<&str>,
+    #[cfg(feature = "mesh-llm")] mesh_model: Option<&str>,
+) {
+    #[cfg(feature = "mesh-llm")]
+    let effective_model = mesh_model.map(relay_mesh_wire_model).or(effective_model);
+    if let Some(prompt) = prompt {
+        command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
+    } else {
+        command.env_remove("BUZZ_ACP_SYSTEM_PROMPT");
+    }
+    if let Some(model) = effective_model {
+        command.env("BUZZ_ACP_MODEL", model);
+    } else {
+        command.env_remove("BUZZ_ACP_MODEL");
+    }
+}
+
+#[cfg(test)]
+mod acp_model_tests {
+    use super::*;
+
+    #[test]
+    fn acp_model_preserves_named_models_and_removes_stale_override() {
+        let mut command = std::process::Command::new("unused");
+        for model in [Some("named-model"), None] {
+            apply_acp_prompt_and_model_env(
+                &mut command,
+                model,
+                model,
+                #[cfg(feature = "mesh-llm")]
+                None,
+            );
+            for key in ["BUZZ_ACP_MODEL", "BUZZ_ACP_SYSTEM_PROMPT"] {
+                let value = command.get_envs().find(|(env_key, _)| *env_key == key);
+                assert_eq!(
+                    value.map(|(_, value)| value),
+                    Some(model.map(std::ffi::OsStr::new))
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "mesh-llm")]
+    #[test]
+    fn acp_model_uses_same_mesh_wire_mapping_as_llm_transport() {
+        for stored in ["auto", "", "named-model"] {
+            let mut command = std::process::Command::new("unused");
+            apply_acp_prompt_and_model_env(&mut command, None, Some("fallback"), Some(stored));
+            let value = command.get_envs().find(|(key, _)| *key == "BUZZ_ACP_MODEL");
+            assert_eq!(
+                value.and_then(|(_, value)| value),
+                Some(std::ffi::OsStr::new(relay_mesh_wire_model(stored)))
+            );
+        }
+    }
+}
 
 /// Translate the native Buzz shared compute provider into the OpenAI-compatible
 /// transport understood by buzz-agent. These are derived runtime details, not
@@ -17,11 +103,7 @@ pub fn apply_relay_mesh_env(
     if provider.map(str::trim) != Some(RELAY_MESH_PROVIDER_ID) {
         return;
     }
-    let model = model
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(RELAY_MESH_AUTO_MODEL_ID)
-        .to_string();
+    let model = relay_mesh_wire_model(model.unwrap_or(RELAY_MESH_AUTO_MODEL_ID)).to_string();
     env.insert("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string());
     env.insert("BUZZ_AGENT_MODEL".to_string(), model.clone());
     env.insert(
@@ -34,14 +116,6 @@ pub fn apply_relay_mesh_env(
         RELAY_MESH_API_KEY_PLACEHOLDER.to_string(),
     );
     env.insert("OPENAI_COMPAT_API".to_string(), "chat".to_string());
-    // Buzz owns the meaning of relay-mesh `auto`: buzz-agent dynamically uses
-    // mesh-llm's virtual Mixture-of-Agents model whenever the live catalog says
-    // at least two distinct models are available, and otherwise keeps the
-    // router's normal single-model `auto` behavior.
-    env.insert(
-        RELAY_MESH_PREFER_MESH_FOR_AUTO_ENV.to_string(),
-        "1".to_string(),
-    );
     // Keep the requested response inside smaller local-model context windows.
     // These are defaults, not policy: the effective agent/persona/global env
     // may deliberately choose a smaller cap or a different effort. This function
@@ -128,10 +202,76 @@ mod tests {
         // stops gemma tool-calling; enabling thinking makes Qwen3 burn ~4x the
         // output budget).
         assert_eq!(env.get("BUZZ_AGENT_THINKING_EFFORT"), None);
+    }
+
+    /// Stored `auto` is translated here, so buzz-agent receives a plain model
+    /// name and needs no knowledge of the mesh. MeshLLM decides per request
+    /// whether `mesh` becomes a committee or a single served model.
+    #[test]
+    fn stored_auto_becomes_the_virtual_mesh_model_on_the_wire() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some(RELAY_MESH_AUTO_MODEL_ID),
+        );
+
         assert_eq!(
-            env.get(RELAY_MESH_PREFER_MESH_FOR_AUTO_ENV)
-                .map(String::as_str),
-            Some("1")
+            env.get("BUZZ_AGENT_MODEL").map(String::as_str),
+            Some(RELAY_MESH_VIRTUAL_MODEL_ID)
+        );
+        assert_eq!(
+            env.get("OPENAI_COMPAT_MODEL").map(String::as_str),
+            Some(RELAY_MESH_VIRTUAL_MODEL_ID)
+        );
+    }
+
+    /// A blank stored model is the legacy encoding of the same intent.
+    #[test]
+    fn blank_stored_model_becomes_the_virtual_mesh_model() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(&mut env, Some(RELAY_MESH_PROVIDER_ID), Some("  "));
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_MODEL").map(String::as_str),
+            Some(RELAY_MESH_VIRTUAL_MODEL_ID)
+        );
+    }
+
+    /// Every consumer that names a model to the mesh goes through one helper,
+    /// so the LLM transport and the ACP harness cannot be told different things.
+    #[test]
+    fn wire_model_maps_auto_and_blank_but_passes_named_through() {
+        assert_eq!(
+            relay_mesh_wire_model(RELAY_MESH_AUTO_MODEL_ID),
+            RELAY_MESH_VIRTUAL_MODEL_ID
+        );
+        assert_eq!(relay_mesh_wire_model(""), RELAY_MESH_VIRTUAL_MODEL_ID);
+        assert_eq!(relay_mesh_wire_model("  "), RELAY_MESH_VIRTUAL_MODEL_ID);
+        assert_eq!(
+            relay_mesh_wire_model("unsloth/gemma-4-E4B-it-GGUF:Q4_K_M"),
+            "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M"
+        );
+    }
+
+    /// A named model is sent verbatim: picking one is an explicit choice to
+    /// bypass mesh routing, and must not be rewritten.
+    #[test]
+    fn a_named_model_is_sent_verbatim() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some("unsloth/Qwen3-8B-GGUF:Q4_K_M"),
+        );
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_MODEL").map(String::as_str),
+            Some("unsloth/Qwen3-8B-GGUF:Q4_K_M")
+        );
+        assert_eq!(
+            env.get("OPENAI_COMPAT_MODEL").map(String::as_str),
+            Some("unsloth/Qwen3-8B-GGUF:Q4_K_M")
         );
     }
 

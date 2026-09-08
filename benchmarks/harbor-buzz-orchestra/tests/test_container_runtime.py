@@ -432,3 +432,111 @@ async def test_stop_agents_sweeps_the_uploaded_stack(tmp_path):
     sweeps = [cmd for cmd, _ in environment.commands if REMOTE_BIN in cmd]
     assert len(sweeps) == 2
     assert "kill -TERM" in sweeps[0] and "kill -KILL" in sweeps[1]
+
+
+async def test_memory_seeding_uses_agent_identity_and_stdin(tmp_path, monkeypatch):
+    from harbor_buzz_orchestra.memory_retrieval import SEEDS
+
+    calls = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, data):
+            calls[-1][2] = data
+            return b"", b""
+
+    async def spawn(*args, **kwargs):
+        calls.append([args, kwargs, None])
+        return Process()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
+    agent = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((agent,), user_relay_url="http://test-relay")
+    await runtime(tmp_path)._seed_memories(agent, trial)
+    assert len(calls) == len(SEEDS)
+    for (args, kwargs, data), (slug, value) in zip(calls, SEEDS.items()):
+        assert args == ("buzz", "mem", "set", slug, "-")
+        assert data == value.encode()
+        assert kwargs["env"]["BUZZ_PRIVATE_KEY"] == agent.nostr_secret_key
+        assert kwargs["env"]["BUZZ_RELAY_URL"] == "http://test-relay"
+
+
+@pytest.mark.parametrize(
+    ("answer", "reward"),
+    [("DONE: 352,345", 1.0), ("DONE: unrelated response", 0.0)],
+)
+async def test_memory_trial_seeds_before_launch_and_keeps_answer_out_of_chat(
+    tmp_path, monkeypatch, answer, reward
+):
+    from harbor_buzz_orchestra.memory_retrieval import CONDITION, INSTRUCTION
+
+    manifest = write_manifest(tmp_path).model_copy(update={"condition": CONDITION})
+    credentials = (
+        credential("orch-1", "orchestrator", "orch-model"),
+        credential("worker-1", "worker", "worker-model"),
+    )
+    rt = runtime(tmp_path)
+    actions = []
+
+    async def noop(*args, **kwargs):
+        pass
+
+    async def seed(*args):
+        actions.append("seed")
+
+    async def launch(**kwargs):
+        actions.append("launch")
+
+    async def send(identity, trial, content):
+        actions.append(content)
+        assert "352345" not in content.replace(",", "")
+
+    async def done(*args):
+        return {"id": "answer", "content": answer}
+
+    for method in (
+        "_install_stack",
+        "_start_forwarder",
+        "_buzz_json",
+        "_wait_for_agents_ready",
+        "_stop_agents",
+        "_collect_logs",
+    ):
+        monkeypatch.setattr(rt, method, noop)
+    monkeypatch.setattr(rt, "_seed_memories", seed)
+    monkeypatch.setattr(rt, "_launch_agent", launch)
+    monkeypatch.setattr(rt, "_send", send)
+    monkeypatch.setattr(rt, "_wait_for_done", done)
+    result = await rt.run(
+        instruction=INSTRUCTION,
+        environment=Environment(),
+        manifest=manifest,
+        trial=trial_handle(credentials),
+    )
+    assert actions == ["seed", "launch", "launch", f"@orch-1 {INSTRUCTION}"]
+    assert result.metadata["memory_retrieval_reward"] == reward
+
+    with pytest.raises(RuntimeLaunchError, match="answer-free"):
+        await rt.run(
+            instruction="The answer is 352,345",
+            environment=Environment(),
+            manifest=manifest,
+            trial=trial_handle(credentials),
+        )
+
+
+async def test_memory_seed_failure_aborts(tmp_path, monkeypatch):
+    class Process:
+        returncode = 1
+
+        async def communicate(self, data):
+            return b"", b"failure"
+
+    async def spawn(*args, **kwargs):
+        return Process()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
+    agent = credential("orch-1", "orchestrator", "orch-model")
+    with pytest.raises(RuntimeLaunchError, match="memory seed failed"):
+        await runtime(tmp_path)._seed_memories(agent, trial_handle((agent,)))
