@@ -1,13 +1,15 @@
-# Upstream memory and event-validation intake
+# Upstream factory reliability intake
 
-Goal: adapt U1 (#6950 memory retrieval) and U2 (#7010 receive-boundary verification) to factory baseline 50d96668 while retaining all fork behavior.
-Architecture: use existing Buzz memory CLI and existing buzz_core::verify_event, with tests at actual prompt and relay boundaries. No wholesale upstream merge or session-policy change.
-Tech stack: Rust/Tokio, Python benchmark fixtures, existing sprig build on ci-1 as buzzagent.
+Goal: bring selected upstream reliability fixes onto factory baseline 50d96668, resolve integration blockers and verify the installed harness. Preserve fork lifecycle protections and canonical agent policy. Rust builds run on ci1 as buzzagent.
 
-- [ ] Inspect upstream pinned patches and actual fork APIs; preserve source attribution.
-- [ ] U1: adapt memory guidance and a meaningful seeded-memory retrieval evaluation using current benchmark harness. Keep canonical VPS memories authoritative; no production secrets in test fixtures.
-- [ ] U2: port forged-event regressions first, demonstrate failure on baseline, then verify every incoming EVENT before routing/dedup/watermarks/queues. Keep observer defense in depth.
-- [ ] Run cargo test -p buzz-acp, scoped clippy and formatting; run repository just ci where supported and record any genuine prerequisite limitation. Preserve heartbeat/WIP/turn-cap regressions.
-- [ ] Independent review, fix findings, commit with upstream attribution and push fork PR(s), no coauthor trailer.
-- [ ] Build immutable sprig artifact on ci-1 as buzzagent from reviewed commit. Verify manifest hash, canary at safe idle boundary, then roll out only if verified; don't restart active turns or remove prior rollback binary.
-- [ ] Record what shipped, measured evaluation outcomes and any unverified runtime behavior. U3 replay recovery next; U4 remains separate opt-in migration with both followup fixes.
+- [x] U1: adapt #6950 memory CLI guidance and isolated seeded-memory evaluation to the fork's DONE runtime. Fixture validation is not a live model success measurement.
+- [x] U2: backport #7010 receive-boundary verification. Demonstrate tampered-content failure before fix; verify before routing, queues and replay state.
+- [x] U3: backport #7325 targeted, capacity-aware replay. Retain best-effort replay semantics and existing bounded writes.
+- [x] Independently verify clean b49f12df: 767 ACP tests, fmt, clippy; Python 41 tests. Build and verify candidate artifact without installing while gates fail.
+- [ ] Resolve Security findings using patched h2/webbrowser and the upstream #6189 MeshLLM/Nostr migration, including mesh-enabled desktop compatibility.
+- [ ] Route Docker build/cache/provenance to this fork's configured GHCR namespaces; retain build and publication gates.
+- [ ] Run final scoped tests and GitHub CI on immutable final commit, independently review the delta, and integrate PR14 only with passing required checks.
+- [ ] Build final immutable sprig, verify archive/manifest identity, install at safe idle boundaries, and verify all active seat processes use the expected executable. Keep rollback artifact and retired Codex disabled.
+- [ ] Update reliability ledger and installation receipt with final source, checks and actual runtime state.
+
+U4 thread-session migration remains separate; do not enable it without its base implementation and both follow-up fixes. No product or clinical behavior changes, live test messages, or product promotion are part of this harness intake.
