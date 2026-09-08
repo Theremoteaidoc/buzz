@@ -29,6 +29,68 @@ pub fn relay_mesh_wire_model(stored: &str) -> &str {
     }
 }
 
+/// Keep the harness model aligned with the LLM transport's wire model.
+/// With no effective model, remove any stale inherited override.
+pub fn apply_acp_prompt_and_model_env(
+    command: &mut std::process::Command,
+    prompt: Option<&str>,
+    effective_model: Option<&str>,
+    #[cfg(feature = "mesh-llm")] mesh_model: Option<&str>,
+) {
+    #[cfg(feature = "mesh-llm")]
+    let effective_model = mesh_model.map(relay_mesh_wire_model).or(effective_model);
+    if let Some(prompt) = prompt {
+        command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
+    } else {
+        command.env_remove("BUZZ_ACP_SYSTEM_PROMPT");
+    }
+    if let Some(model) = effective_model {
+        command.env("BUZZ_ACP_MODEL", model);
+    } else {
+        command.env_remove("BUZZ_ACP_MODEL");
+    }
+}
+
+#[cfg(test)]
+mod acp_model_tests {
+    use super::*;
+
+    #[test]
+    fn acp_model_preserves_named_models_and_removes_stale_override() {
+        let mut command = std::process::Command::new("unused");
+        for model in [Some("named-model"), None] {
+            apply_acp_prompt_and_model_env(
+                &mut command,
+                model,
+                model,
+                #[cfg(feature = "mesh-llm")]
+                None,
+            );
+            for key in ["BUZZ_ACP_MODEL", "BUZZ_ACP_SYSTEM_PROMPT"] {
+                let value = command.get_envs().find(|(env_key, _)| *env_key == key);
+                assert_eq!(
+                    value.map(|(_, value)| value),
+                    Some(model.map(std::ffi::OsStr::new))
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "mesh-llm")]
+    #[test]
+    fn acp_model_uses_same_mesh_wire_mapping_as_llm_transport() {
+        for stored in ["auto", "", "named-model"] {
+            let mut command = std::process::Command::new("unused");
+            apply_acp_prompt_and_model_env(&mut command, None, Some("fallback"), Some(stored));
+            let value = command.get_envs().find(|(key, _)| *key == "BUZZ_ACP_MODEL");
+            assert_eq!(
+                value.and_then(|(_, value)| value),
+                Some(std::ffi::OsStr::new(relay_mesh_wire_model(stored)))
+            );
+        }
+    }
+}
+
 /// Translate the native Buzz shared compute provider into the OpenAI-compatible
 /// transport understood by buzz-agent. These are derived runtime details, not
 /// user-owned agent configuration.

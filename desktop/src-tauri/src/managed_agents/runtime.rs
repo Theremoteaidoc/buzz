@@ -747,28 +747,13 @@ pub fn spawn_agent_child(
     let effective_model = effective_cfg.model.value;
     let effective_provider = effective_cfg.provider.value;
 
-    if let Some(prompt) = &effective_prompt {
-        command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
-    } else {
-        command.env_remove("BUZZ_ACP_SYSTEM_PROMPT");
-    }
-    // Shared compute stores `auto`, but the wire name is MeshLLM's virtual
-    // `mesh` model. Translate here too, so the harness and the LLM client are
-    // told the same thing: `BUZZ_ACP_MODEL=auto` would name a model the mesh
-    // never advertises, leaving buzz-acp to warn and fall back on every new
-    // session while `BUZZ_AGENT_MODEL` said `mesh`.
-    #[cfg(feature = "mesh-llm")]
-    let acp_model = match (&mesh_model_id, effective_model.as_deref()) {
-        (Some(mesh_model_id), _) => Some(super::relay_mesh_wire_model(mesh_model_id).to_string()),
-        (None, model) => model.map(str::to_owned),
-    };
-    #[cfg(not(feature = "mesh-llm"))]
-    let acp_model = effective_model.as_deref().map(str::to_owned);
-    if let Some(model) = acp_model.as_deref() {
-        command.env("BUZZ_ACP_MODEL", model);
-    } else {
-        command.env_remove("BUZZ_ACP_MODEL");
-    }
+    super::apply_acp_prompt_and_model_env(
+        &mut command,
+        effective_prompt.as_deref(),
+        effective_model.as_deref(),
+        #[cfg(feature = "mesh-llm")]
+        mesh_model_id.as_deref(),
+    );
     // Session title for the harness to pass out-of-band on `session/new`. The
     // adapter names the session after it; it never reaches the prompt, so this
     // is display metadata only. The spawn-config snapshot records the same
