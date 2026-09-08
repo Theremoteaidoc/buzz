@@ -127,3 +127,8 @@ uv run --extra dev ruff check .
 
 Live provisioner tests require the benchmark compose stack and opt-in
 environment described in `testbed/tests/test_provisioner_live.py`.
+
+The opt-in [cold-memory retrieval regression](tasks/memory-retrieval/README.md)
+uses synthetic memories seeded before agent launch. Its setup and grading differ
+from the orchestration artifact tasks above. Local fixture tests do not run a
+model or establish retrieval success.

@@ -21,6 +21,7 @@ from typing import Any
 from harbor.environments.base import BaseEnvironment
 
 from .manifest import AgentClass, ExperimentManifest
+from .memory_retrieval import CONDITION, INSTRUCTION, SEEDS, score_answer
 from .provisioning import AgentCredential, TrialHandle
 from .runtime import RuntimeResult
 
@@ -111,6 +112,11 @@ class BuzzContainerRuntime:
         manifest: ExperimentManifest,
         trial: TrialHandle,
     ) -> RuntimeResult:
+        memory_trial = manifest.condition == CONDITION
+        if memory_trial and instruction.strip() != INSTRUCTION:
+            raise RuntimeLaunchError(
+                "memory-retrieval requires its answer-free instruction"
+            )
         classes = self._classes_by_agent_id(manifest, trial.credentials)
         orchestrator = next(c for c in trial.credentials if c.role == "orchestrator")
         workers = [c for c in trial.credentials if c.agent_id != orchestrator.agent_id]
@@ -134,6 +140,8 @@ class BuzzContainerRuntime:
                 "--name",
                 trial.user.agent_id,
             )
+            if memory_trial:
+                await self._seed_memories(orchestrator, trial)
             for credential in trial.credentials:
                 await self._buzz_json(
                     credential,
@@ -170,8 +178,21 @@ class BuzzContainerRuntime:
             await self._stop_agents(environment, agents + infra)
             await self._collect_logs(environment, trial_dir)
 
+        if memory_trial:
+            reward = score_answer(final_message["content"])
+            result = await environment.exec(
+                f"printf '%s\\n' '{reward}' > /app/memory-retrieval-reward.txt"
+            )
+            if result.return_code != 0:
+                raise RuntimeLaunchError("cannot write memory retrieval reward")
+
         return RuntimeResult(
             metadata={
+                **(
+                    {"memory_retrieval_reward": score_answer(final_message["content"])}
+                    if memory_trial
+                    else {}
+                ),
                 "completion_message_id": final_message["id"],
                 "completion_message": final_message["content"],
                 "agent_runtime": "in-container",
@@ -517,6 +538,31 @@ class BuzzContainerRuntime:
                 "M1 pre-verifier sanity probe failed: /app/hello.txt must exist "
                 f"and its stripped text must equal 'Hello, world!' ({detail})"
             )
+
+    async def _seed_memories(
+        self, credential: AgentCredential, trial: TrialHandle
+    ) -> None:
+        """Write synthetic cold values under the trial agent before it starts."""
+        for slug, value in SEEDS.items():
+            process = await asyncio.create_subprocess_exec(
+                self.buzz_cli_binary,
+                "mem",
+                "set",
+                slug,
+                "-",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={
+                    **os.environ,
+                    "BUZZ_RELAY_URL": self._user_relay_url(trial),
+                    "BUZZ_PRIVATE_KEY": credential.nostr_secret_key,
+                    "BUZZ_AUTH_TAG": credential.nostr_auth_tag,
+                },
+            )
+            await process.communicate(value.encode())
+            if process.returncode != 0:
+                raise RuntimeLaunchError(f"memory seed failed for {slug}")
 
     async def _send(
         self, credential: AgentCredential, trial: TrialHandle, content: str

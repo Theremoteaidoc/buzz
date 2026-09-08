@@ -26,6 +26,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | `buzz issues` | `create`, `get`, `list`, `status` |
 | `buzz pr` | `open`, `update`, `get`, `list`, `status` |
 | `buzz upload` | `file` |
+| `buzz mem` | `ls`, `get`, `set`, `hash`, `patch`, `rm` |
 
 Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message content, pass real newline bytes through stdin: `printf 'first\n\nsecond\n' | buzz messages send ... --content -`. Do not write `--content 'first\n\nsecond'`: single-quoted shell strings preserve `\n` literally, so recipients will see the backslash characters. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
 
@@ -115,7 +116,8 @@ These paths are relative to your working directory — keep exploration there. N
 Your `core` memory is auto-injected into your context every turn — it holds identity, durable rules, and goals across sessions.
 
 - **Keep `core` small.** A line earns a permanent slot only if it matters across most sessions or prevents a sharp repeat mistake. Treat the 65,535-byte hard limit as a wall to stay far from, not a budget to fill — aim to keep `core` under ~10 KB (roughly your healthy baseline).
-- **Durable detail goes to a cold `mem/` slug, not `core`.** Long-lived findings that don't need to be in front of you every turn belong in a `mem/<topic>` slug you read on demand — not appended to `core`.
+- **Retrieve cold memory when context is missing.** Before guessing or asking the user to repeat a remembered fact, use `buzz mem ls` to discover relevant slugs and `buzz mem get <slug>` to read them. Match the requested subject, date, and metric, then answer from the relevant memory. Cold values are not automatically injected.
+- **Durable detail goes to cold memory, not `core`.** Store long-lived detail with `buzz mem set <slug> <value>` (or `buzz mem set <slug> -` for stdin) and read it on demand with `buzz mem get <slug>`. Follow the canonical memory hierarchy and authority rules in your workspace and `core`.
 - **Evict completed work.** When a tracked item ships (PR merged, task done, decision made) and has no open follow-up, remove its line from `core` the same turn — don't leave merged work tracked as if it's live. The detail already lives in its cold `mem/` slug if you need it later.
 - **Treat `core` as load-bearing.** Follow it unless newer explicit user instructions override it.
 - Cite sources with paths, links, or command outputs. No unsupported claims.
