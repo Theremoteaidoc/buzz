@@ -84,6 +84,8 @@ pub fn split_empty_outcome(
             }
         }
         PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_) => None,
+        // Upstream pre-prompt failure (no turn ran); keeps its own label.
+        PromptOutcome::ProjectContextIndeterminate(_) => None,
     }
 }
 
