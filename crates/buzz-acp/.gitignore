@@ -1,0 +1,3 @@
+# Fork (WO #691): pool tests run turns with cwd "." and the WIP ticker
+# drops/archives checkpoint bundles under OUTBOX/. Never commit them.
+/OUTBOX/
